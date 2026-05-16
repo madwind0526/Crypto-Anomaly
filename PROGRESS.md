@@ -111,7 +111,7 @@ public/market/
 
 ---
 
-## 현재 상태 (2026-05-15)
+## 현재 상태 (2026-05-16)
 
 - [x] 독립 프로젝트 생성 (`C:\Claude\Crypto-Anomaly`)
 - [x] 특이점 감지 로직 구현 (10%/3x, 2h cooldown)
@@ -119,20 +119,20 @@ public/market/
 - [x] 파라미터 적응 (전일 medianMove 기반)
 - [x] 4개 전략 (A/B/C/D) 동일 종목 모니터링
 - [x] 전용 데이터 fetch 스크립트 (fetch:anomaly:1m, fetch:hist5m)
-- [x] git main 브랜치 초기화
-- [x] 의존성 설치 완료
-- [ ] UI 확인 (npm run dev → 브라우저에서 확인)
+- [x] UI 확인 (npm run dev → A/B/C/D 탭, Summary, Daily 운영 모두 정상)
+- [x] Daily 운영 화면 캔들 표시 수정 (`public/market/upbit-krw-1m-daily.json` 시뮬 출력 추가)
+- [x] 전략 리포트 테이블 정렬 기능 (기본 Return ▼, 헤더 클릭으로 오름/내림 전환)
+- [x] hist5m 갱신 완료 (2026-05-15T15:12 기준)
 - [ ] 루프 모드 실제 운영 테스트
-- [ ] hist5m 정기 갱신 전략 (현재 2026-05-12 이후 stale)
+- [ ] hist5m 정기 갱신 전략 (주 1회 `fetch:hist5m` 권장)
 
 ---
 
 ## 미해결 / 다음 세션에서 할 것
 
 ### 단기
-1. `npm run dev` 로 UI 열어서 대시보드 정상 표시 확인
-2. `npm run sim:anomaly:loop` 으로 루프 모드 안정성 확인
-3. hist5m 갱신: `npm run fetch:hist5m` (30분 소요, 처음 한번)
+1. `npm run sim:anomaly:loop` 으로 루프 모드 안정성 확인
+2. 매일 운영 루틴: `fetch:anomaly:1m` → `sim:anomaly` 순서로 실행 (또는 loop 모드)
 
 ### 중기
 4. 선택 종목이 0개일 때 graceful 처리 (hist5m stale 극단 케이스)
@@ -150,15 +150,33 @@ public/market/
 
 ## 알려진 이슈
 
-### B/C/D 전략 trade 없음
-현재 B(FirstExplosion)/C(ConfirmedBurst)/D(SweepBest)가 trade=0.
-- B/C는 5m 캔들 기준으로 설계 (2.5% body, 3.5x vol) → 1m 캔들에서는 기준이 너무 엄격
-- D는 anomalyStrategy 원본 로직 → 1m 스케일 미확인
+### B/C 전략: roc48 → preRoc5 수정 완료 (2026-05-15)
+- **근본 원인**: 1m 캔들에서 roc48 = 48분 ROC. 펌프 자체가 roc48을 3.5% 이상으로 밀어버려 진입 차단.
+- **수정**: `roc48 < 0.035` 대신 `preRoc5 < 0.05` — 폭발 캔들 이전 5분간의 ROC를 측정.
+  - B: `pre5Close = candles[i-6].close`, `pre1Close = candles[i-1].close`
+  - C: `prev5Close = candles[i-7].close`, `prev2Close = candles[i-2].close`
+- **오늘(2026-05-15) 0거래 이유**: 조용하고 하락 장세. PROS 최대 body=-2.89% (매도), 나머지 <2.5% → B의 `body>=0.025` 미달성. 수정 자체는 이론상 정확함.
 
-### 파라미터 적응이 base와 동일
-전일 live 1m에서 특이점 이벤트가 감지되지 않아 적응이 일어나지 않음.
-liveEventCount=0인 것과 같은 원인.
+### D 전략 1m 스케일 조정 완료 (2026-05-15)
+- `accelerationMin: 0.020` (기존 0.045 — 5m 기준), `maxExtendedMove: 0.25` (기존 0.18)
 
 ### hist5m이 2026-05-12 이후 stale
 메인 프로젝트(Codex)가 fetch를 멈춘 것으로 보임.
 이 프로젝트에서 독립적으로 `npm run fetch:hist5m`으로 갱신 가능.
+
+### liveEventCount=0 미해결
+전일 live 1m 특이점 이벤트가 감지되지 않아 파라미터 적응이 base와 동일.
+detectAnomalyEvents 1m 경로 검증 필요.
+
+---
+
+## UI 변경 내역 (2026-05-15)
+
+- General 관련 화면 전체 제거 (`scenario-general`, `report-general`, `LoginPlaceholder`, `GeneralScenarioBuilder`, `GeneralReport`)
+- `report-summary` 유지
+- Anomaly 화면 내부에 A/B/C/D 탭 버튼 추가
+- `ANOMALY_STRATEGY_INFO` 상수: 각 전략의 entry/hold/trail/exit 설명
+- 브랜드명: "Crypto Trading" → "Anomaly Lab"
+- 기본 화면: `report-anomaly`
+- Daily 운영 가이드 모드 기본값: `"strict"` → `"ignored"`
+- 상단 "General Refresh" 버튼 제거

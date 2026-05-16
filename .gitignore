@@ -1,5 +1,7 @@
 node_modules/
 dist/
 .tmp/
+.claude/
 data/market/
+public/market/upbit-krw-1m-daily.json
 *.tsbuildinfo

@@ -21,19 +21,16 @@ import {
 } from "../simulation/optimizer";
 import { buildTraderOptimizationPlans, type TraderOptimizationPlan } from "../simulation/traderOptimization";
 import { strategies } from "../strategies";
-import { traderProfiles, type TraderProfile } from "../traders/profiles";
+import { traderProfiles } from "../traders/profiles";
 import type { BacktestResult, Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
 import { MarketChart } from "../ui/MarketChart";
 
 type ThemeMode = "light" | "dark";
 type AutoBlockMode = "enabled" | "disabled";
 type ScreenId =
-  | "login"
-  | "scenario-general"
   | "scenario-anomaly"
   | "scenario-guideline"
   | "report-summary"
-  | "report-general"
   | "report-anomaly"
   | "daily-general-a"
   | "daily-general-b"
@@ -45,12 +42,9 @@ type GuideFilterMode = GuideRuleMode | "all";
 type SafetyFilterMode = AutoBlockMode | "all";
 const screenStorageKey = "crypto-trading.screenId";
 const screenIds: ScreenId[] = [
-  "login",
-  "scenario-general",
   "scenario-anomaly",
   "scenario-guideline",
   "report-summary",
-  "report-general",
   "report-anomaly",
   "daily-general-a",
   "daily-general-b",
@@ -59,7 +53,7 @@ const screenIds: ScreenId[] = [
 ];
 
 type PopupState =
-  | { currentReturn: number; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
+  | { currentReturn: number; dayStartMs: number | undefined; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
   | {
       autoBlockMode: AutoBlockMode;
       guideMode: GuideRuleMode;
@@ -92,7 +86,8 @@ interface DisplayTrade extends Trade {
 interface DailyEntry {
   autoBlock: AutoBlockEvaluation;
   blockedBuyCount: number;
-  candles: Candle[];
+  candles: Candle[];      // all candles including pre-midnight (for chart)
+  dayStartMs: number;     // KST midnight timestamp (for midnight line)
   currentReturn: number;
   label: string;
   market: string;
@@ -169,32 +164,26 @@ const chartIntervalPresets: Array<{ interval: ChartInterval; label: string; valu
 
 const menuSections: MenuSection[] = [
   {
-    title: "Account",
-    items: [{ id: "login", label: "Login", caption: "Placeholder" }],
-  },
-  {
-    title: "Scenario Builder",
+    title: "전략 개요",
     items: [
-      { id: "scenario-general", label: "General Scenario", caption: "Overview / Build" },
-      { id: "scenario-anomaly", label: "Anomaly Scenario", caption: "Overview / Build" },
-      { id: "scenario-guideline", label: "Base Guideline/Safety", caption: "Overview" },
+      { id: "scenario-anomaly", label: "특이점 전략 A/B/C/D", caption: "진입 조건 / 파라미터" },
+      { id: "scenario-guideline", label: "리스크 가이드", caption: "Safety / Guideline" },
     ],
   },
   {
-    title: "Strategy Report",
+    title: "시뮬레이션 결과",
     items: [
       { id: "report-summary", label: "Summary" },
-      { id: "report-general", label: "General Scenario Report" },
-      { id: "report-anomaly", label: "Anomaly Scenario Report" },
+      { id: "report-anomaly", label: "전략 리포트 A/B/C/D" },
     ],
   },
   {
-    title: "Daily Operation Simulation",
+    title: "Daily 운영",
     items: [
-      { id: "daily-general-a", label: "Anomaly-A" },
-      { id: "daily-general-b", label: "Anomaly-B" },
-      { id: "daily-general-c", label: "Anomaly-C" },
-      { id: "daily-anomaly", label: "Anomaly-D" },
+      { id: "daily-general-a", label: "Anomaly-A", caption: "Calm Impulse" },
+      { id: "daily-general-b", label: "Anomaly-B", caption: "First Explosion" },
+      { id: "daily-general-c", label: "Anomaly-C", caption: "Confirmed Burst" },
+      { id: "daily-anomaly", label: "Anomaly-D", caption: "Sweep Best" },
     ],
   },
 ];
@@ -233,10 +222,10 @@ export function App() {
   const [reportGuideMode, setReportGuideMode] = useState<GuideRuleMode>("strict");
   const [reportAutoBlockMode, setReportAutoBlockMode] = useState<AutoBlockMode>("enabled");
   const [dailyGuideModes, setDailyGuideModes] = useState<Record<string, GuideRuleMode>>({
-    "daily-general-a": "strict",
-    "daily-general-b": "strict",
-    "daily-general-c": "strict",
-    "daily-anomaly": "strict",
+    "daily-general-a": "ignored",
+    "daily-general-b": "ignored",
+    "daily-general-c": "ignored",
+    "daily-anomaly": "ignored",
   });
   const [dailyAutoBlockModes, setDailyAutoBlockModes] = useState<Record<string, AutoBlockMode>>({
     "daily-general-a": "enabled",
@@ -420,8 +409,8 @@ export function App() {
     }));
   }
 
-  function openMarketPopup(market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary) {
-    setPopup({ currentReturn, kind: "market", market, tradeSummary, trades });
+  function openMarketPopup(market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) {
+    setPopup({ currentReturn, dayStartMs, kind: "market", market, tradeSummary, trades });
     setModalInterval(chartInterval);
   }
 
@@ -459,7 +448,7 @@ export function App() {
       <aside className="sidebar" aria-label="Main menu">
         <div className="brand-block">
           <p className="eyebrow">Upbit KRW Simulation Lab</p>
-          <h1>Crypto Trading</h1>
+          <h1>Anomaly Lab</h1>
           <span>{marketData.isRealUpbitData ? "Upbit Cached" : "Sample Only"}</span>
         </div>
         <nav className="menu">
@@ -499,47 +488,17 @@ export function App() {
             <button
               className="utility-button"
               disabled={refreshStatus?.running}
-              onClick={() => handleStrategyRefresh("general")}
-              type="button"
-            >
-              General Refresh
-            </button>
-            <button
-              className="utility-button"
-              disabled={refreshStatus?.running}
               onClick={() => handleStrategyRefresh("anomaly")}
               type="button"
             >
-              Anomaly Refresh
+              Refresh
             </button>
           </div>
         </header>
 
-        {screenId === "login" ? <LoginPlaceholder /> : null}
-        {screenId === "scenario-general" ? (
-          <GeneralScenarioBuilder
-            importNotice={importNotice}
-            onExport={(traderId) =>
-              exportScenarioPayload(
-                `${traderId}-scenario`,
-                activeOptimizationPlans.find((plan) => plan.strategyId === traderId),
-              )
-            }
-            onImport={handleImport}
-            plans={activeOptimizationPlans}
-          />
-        ) : null}
         {screenId === "scenario-anomaly" ? (
           <AnomalyScenarioBuilder
-            importNotice={importNotice}
-            onExport={() =>
-              exportScenarioPayload(
-                "anomaly-scenario",
-                activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly"),
-              )
-            }
-            onImport={handleImport}
-            plan={activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly")}
+            plans={activeOptimizationPlans}
           />
         ) : null}
         {screenId === "scenario-guideline" ? (
@@ -565,24 +524,14 @@ export function App() {
             ranked={ranked}
           />
         ) : null}
-        {screenId === "report-general" ? (
-          <GeneralReport
+        {screenId === "report-anomaly" ? (
+          <AnomalyReport
             autoBlockMode={reportAutoBlockMode}
             comparisons={activeComparisons}
             guideMode={reportGuideMode}
             onAutoBlockModeChange={updateSharedAutoBlockMode}
             onGuideModeChange={updateSharedGuideMode}
             plans={activeOptimizationPlans}
-          />
-        ) : null}
-        {screenId === "report-anomaly" ? (
-          <AnomalyReport
-            autoBlockMode={reportAutoBlockMode}
-            comparison={activeComparisons.find((comparison) => comparison.bestResult.strategyId === "anomaly")}
-            guideMode={reportGuideMode}
-            onAutoBlockModeChange={updateSharedAutoBlockMode}
-            onGuideModeChange={updateSharedGuideMode}
-            plan={activeOptimizationPlans.find((plan) => plan.strategyId === "anomaly")}
           />
         ) : null}
         {isDailyScreen ? (
@@ -616,6 +565,7 @@ export function App() {
         <MarketInfoPopup
           candles={selectedMarketCandles}
           currentReturn={popup.currentReturn}
+          dayStartMs={popup.dayStartMs}
           interval={modalInterval}
           market={popup.market}
           onClose={() => setPopup(null)}
@@ -665,109 +615,105 @@ async function loadRefreshStatus(): Promise<StrategyRefreshStatus | null> {
   }
 }
 
-function LoginPlaceholder() {
-  return (
-    <section className="panel hero-panel">
-      <p className="eyebrow">Reserved</p>
-      <h3>로그인 영역</h3>
-      <p>지금은 자리만 준비했습니다. 나중에 Upbit read-only 계정 확인, 로컬 사용자 설정, 실거래 잠금 해제 승인 같은 안전 흐름을 붙일 수 있습니다.</p>
-      <div className="placeholder-box">로그인 자리</div>
-    </section>
-  );
-}
 
-function GeneralScenarioBuilder({
-  importNotice,
-  onExport,
-  onImport,
+
+const ANOMALY_STRATEGY_INFO: Array<{
+  id: TraderId;
+  label: string;
+  subtitle: string;
+  entry: string;
+  hold: string;
+  trail: string;
+  exit: string;
+}> = [
+  {
+    id: "momentum",
+    label: "Anomaly-A",
+    subtitle: "Calm Impulse",
+    entry: "15봉 이상 조용한 구간 (평균 바디 < 0.5%) 이후 첫 충동 캔들 진입. 바디 ≥ 1.5%, 거래량 ≥ 1.5× 48봉 평균, 48봉 ROC < 5%.",
+    hold: "최대 12봉 (12분)",
+    trail: "2.8% (적응형)",
+    exit: "거래량 fade (< 1.2× 평균) 또는 시간 초과",
+  },
+  {
+    id: "range-grid",
+    label: "Anomaly-B",
+    subtitle: "First Explosion",
+    entry: "폭발 캔들 자체에 직접 진입. 바디 ≥ 2.5%, 거래량 ≥ 3.5×, 상단 비율 ≥ 60%, 선행 3봉 조용함 필수.",
+    hold: "최대 6봉 (6분)",
+    trail: "1.8% (적응형)",
+    exit: "거래량 fade (< 1.3×) 또는 역봉 (바디 < −0.8%) 또는 시간 초과",
+  },
+  {
+    id: "arbitrage",
+    label: "Anomaly-C",
+    subtitle: "Confirmed Burst",
+    entry: "폭발 다음 봉에서 확인 후 진입. 이전 봉: 바디 ≥ 2.5% + 거래량 ≥ 3.5×. 현재 봉: 거래량 ≥ 1.8× + 상승 유지.",
+    hold: "최대 8봉 (8분)",
+    trail: "2.2% (적응형)",
+    exit: "거래량 fade (< 1.2×) 또는 역봉 (바디 < −1%) 또는 시간 초과",
+  },
+  {
+    id: "anomaly",
+    label: "Anomaly-D",
+    subtitle: "Sweep Best",
+    entry: "상대 거래량 ≥ 3.5×, 3봉 가격 가속 ≥ 4.5%, 24봉 고점 돌파, 과열 (48봉 ROC < 18%) 미초과.",
+    hold: "최대 12봉 (12분)",
+    trail: "1.8% (적응형)",
+    exit: "거래량 fade (< 1.2× 평균) 또는 시간 초과",
+  },
+];
+
+function AnomalyScenarioBuilder({
   plans,
 }: {
-  importNotice: string;
-  onExport: (traderId: TraderId) => void;
-  onImport: (file: File | undefined, scope: string) => void;
   plans: TraderOptimizationPlan[];
 }) {
-  const generalProfiles = traderProfiles.filter((profile) => profile.id !== "anomaly");
-  const [selectedGeneralId, setSelectedGeneralId] = useState<TraderId>("momentum");
-  const selectedProfile = generalProfiles.find((profile) => profile.id === selectedGeneralId) ?? generalProfiles[0];
-  const selectedPlan = plans.find((item) => item.strategyId === selectedProfile.id);
+  const [selectedId, setSelectedId] = useState<TraderId>("momentum");
+  const selected = ANOMALY_STRATEGY_INFO.find((s) => s.id === selectedId)!;
+  const plan = plans.find((p) => p.strategyId === selectedId);
 
   return (
     <>
       <section className="panel">
         <div className="section-head">
           <div>
-            <h3>General 시나리오 개요 및 구축</h3>
-            <p>A/B/C 일반 시나리오는 top 30 후보를 전략별로 최적화한 뒤 12개 감시 종목을 고르는 흐름입니다.</p>
+            <h3>특이점 전략 A/B/C/D 개요</h3>
+            <p>4개 전략은 동일한 종목 리스트(특이점 감지 종목)를 공통으로 감시하며, 진입 타이밍과 보유 방식만 다릅니다.</p>
           </div>
-          <strong>Top 30 -&gt; 12</strong>
+          <strong>{plan?.selectedMarkets.length ?? 0}개 감시</strong>
+        </div>
+        <div className="logic-grid" style={{ marginBottom: "12px" }}>
+          <InfoTile title="종목 선택" value="hist5m 90일 스캔 (10%/3×) + live 1m 24h → union. 마지막 특이점 후 45일 초과 시 제거." />
+          <InfoTile title="파라미터 적응" value="전일 live 1m 특이점 이벤트의 중앙값 가격이동 기준으로 trailingStop / maxHold 자동 조정." />
+          <InfoTile title="쿨다운" value="동일 이벤트 중복 감지 방지. 5m: 24봉(2h), 1m: 120봉(2h)." />
+          <InfoTile title="공통 조건" value="Guideline X (ignored) 모드 기준. 특이점 종목에서 각 전략이 독립 신호를 냅니다." />
         </div>
         <div className="choice-tabs">
-          {generalProfiles.map((profile) => (
+          {ANOMALY_STRATEGY_INFO.map((s) => (
             <button
-              className={selectedGeneralId === profile.id ? "active" : ""}
-              key={profile.id}
-              onClick={() => setSelectedGeneralId(profile.id)}
+              className={selectedId === s.id ? "active" : ""}
+              key={s.id}
+              onClick={() => setSelectedId(s.id)}
               type="button"
             >
-              {shortStrategyName(profile.id)}
+              {s.label}
             </button>
           ))}
         </div>
         <div className="scenario-grid scenario-grid--single">
-          {generalProfiles.map((profile) => {
-            const plan = plans.find((item) => item.strategyId === profile.id);
-            return (
-              <article className={selectedGeneralId === profile.id ? "scenario-card" : "scenario-card hidden"} key={profile.id}>
-                <h4>{profile.name}</h4>
-                <p>{profile.summary}</p>
-                <ScenarioIOControls
-                  exportLabel={`${profile.name} export`}
-                  importScope={profile.name}
-                  onExport={() => onExport(profile.id)}
-                  onImport={onImport}
-                />
-                <small>{plan ? `${plan.selectedMarkets.length}개 감시 종목 준비됨` : "아직 결과 없음"}</small>
-              </article>
-            );
-          })}
+          <article className="scenario-card">
+            <h4>{selected.label} / {selected.subtitle}</h4>
+            <div className="logic-grid">
+              <InfoTile title="진입 조건" value={selected.entry} />
+              <InfoTile title="보유 한도" value={selected.hold} />
+              <InfoTile title="Trailing Stop" value={selected.trail} />
+              <InfoTile title="청산 조건" value={selected.exit} />
+            </div>
+            <small>{plan ? `${plan.selectedMarkets.length}개 감시 종목 준비됨` : "데이터 없음 — npm run sim:anomaly 실행 필요"}</small>
+          </article>
         </div>
       </section>
-      <LogicReviewPanel />
-      <NoticePanel title="Import 상태" value={importNotice} />
-    </>
-  );
-}
-
-function AnomalyScenarioBuilder({
-  importNotice,
-  onExport,
-  onImport,
-  plan,
-}: {
-  importNotice: string;
-  onExport: () => void;
-  onImport: (file: File | undefined, scope: string) => void;
-  plan: TraderOptimizationPlan | undefined;
-}) {
-  return (
-    <>
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>특이점 시나리오 개요 및 구축</h3>
-            <p>특이점 전략은 특정 종목을 추격하기 위한 기능이 아니라, 공개 데이터에서 비정상 움직임을 빠르게 감시하는 실험입니다.</p>
-          </div>
-          <strong>{plan?.selectedMarkets.length ?? 0}/12</strong>
-        </div>
-        <div className="logic-grid">
-          <InfoTile title="이상점 정의" value="상대 거래대금 급증, 1~3분 가격 가속, 단기 고점 돌파, 과열 속도 초과 여부를 봅니다." />
-          <InfoTile title="매수 후보" value="신호 점수가 높고 아직 과열 속도를 넘지 않았으며, 스프레드/슬리피지 위험이 낮은 종목입니다." />
-          <InfoTile title="회피 조건" value="이미 과도하게 오른 뒤의 신호, 돌파 실패, 거래대금 하락, 급반전, 손익비 악화는 차단합니다." />
-        </div>
-        <ScenarioIOControls exportLabel="Anomaly export" importScope="Anomaly" onExport={onExport} onImport={onImport} />
-      </section>
-      <NoticePanel title="Import 상태" value={importNotice} />
     </>
   );
 }
@@ -857,7 +803,8 @@ function SummaryReport({
   );
 }
 
-function GeneralReport({
+
+function AnomalyReport({
   autoBlockMode,
   comparisons,
   guideMode,
@@ -872,26 +819,19 @@ function GeneralReport({
   onGuideModeChange: (mode: GuideRuleMode) => void;
   plans: TraderOptimizationPlan[];
 }) {
-  const generalTraderIds: TraderId[] = ["momentum", "range-grid", "arbitrage"];
-  const [selectedGeneralId, setSelectedGeneralId] = useState<TraderId>("momentum");
-  const selectedComparison = comparisons.find((comparison) => comparison.bestResult.strategyId === selectedGeneralId);
-  const selectedPlan = plans.find((plan) => plan.strategyId === selectedGeneralId);
-  const selectedRankedResults =
-    selectedPlan?.selectedMarkets.slice(0, 3).map((item) => ({
-      bestResult: item.bestResult,
-      strategyName: selectedComparison?.strategyName ?? selectedPlan.strategyName,
-      testedMarkets: selectedPlan.selectedMarkets.length,
-      testedScenarios: 1,
-    })) ??
-    (selectedComparison ? [selectedComparison] : []);
+  const anomalyIds: TraderId[] = ["momentum", "range-grid", "arbitrage", "anomaly"];
+  const [selectedId, setSelectedId] = useState<TraderId>("momentum");
+  const info = ANOMALY_STRATEGY_INFO.find((s) => s.id === selectedId)!;
+  const comparison = comparisons.find((c) => c.bestResult.strategyId === selectedId);
+  const plan = plans.find((p) => p.strategyId === selectedId);
 
   return (
     <>
       <section className="panel">
         <div className="section-head">
           <div>
-            <h3>General 시나리오 Report</h3>
-            <p>A/B/C 일반 전략의 수익률, 낙폭, 거래 수, 감시 종목을 비교합니다.</p>
+            <h3>특이점 전략 리포트</h3>
+            <p>A/B/C/D 전략의 백테스트 결과. 동일 종목 리스트, 다른 진입 타이밍.</p>
           </div>
           <div className="operation-toggles">
             <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
@@ -899,74 +839,42 @@ function GeneralReport({
           </div>
         </div>
         <div className="choice-tabs">
-          {generalTraderIds.map((traderId) => (
-            <button
-              className={selectedGeneralId === traderId ? "active" : ""}
-              key={traderId}
-              onClick={() => setSelectedGeneralId(traderId)}
-              type="button"
-            >
-              {shortStrategyName(traderId)}
-            </button>
-          ))}
+          {anomalyIds.map((id) => {
+            const s = ANOMALY_STRATEGY_INFO.find((x) => x.id === id)!;
+            return (
+              <button
+                className={selectedId === id ? "active" : ""}
+                key={id}
+                onClick={() => setSelectedId(id)}
+                type="button"
+              >
+                {s.label}
+              </button>
+            );
+          })}
         </div>
-        <ComparisonTable
-          ranked={selectedRankedResults}
-        />
+        <div style={{ marginBottom: "8px" }}>
+          <strong style={{ fontSize: "0.9rem", color: "var(--muted)" }}>{info.label} / {info.subtitle}</strong>
+        </div>
+        {comparison ? (
+          <MetricStrip result={comparison.bestResult} />
+        ) : (
+          <div className="empty-state">결과 없음 — 백테스트 데이터가 아직 없습니다.</div>
+        )}
       </section>
-      {[selectedGeneralId].map((traderId) => {
-        const comparison = comparisons.find((item) => item.bestResult.strategyId === traderId);
-        const plan = plans.find((item) => item.strategyId === traderId);
-        const profile = traderProfiles.find((item) => item.id === traderId);
-
-        return (
-          <section className="panel" key={traderId}>
-            <div className="section-head">
-              <div>
-                <h3>{profile?.name ?? traderId}</h3>
-                <p>{profile?.summary ?? "General strategy report."} All 12 selected monitoring candidates are shown below.</p>
-              </div>
-              <strong>{shortMarket(comparison?.bestResult.market ?? "TBD")}</strong>
+      {plan ? (
+        <section className="panel">
+          <div className="section-head">
+            <div>
+              <h3>{info.label} 종목별 결과</h3>
+              <p>{info.subtitle} — 감시 종목 {plan.selectedMarkets.length}개</p>
             </div>
-            {comparison ? <MetricStrip result={comparison.bestResult} /> : <div className="empty-state">No result yet.</div>}
-            {plan ? <OptimizationPlanView plan={plan} /> : null}
-          </section>
-        );
-      })}
+            <strong>{shortMarket(comparison?.bestResult.market ?? "TBD")}</strong>
+          </div>
+          <OptimizationPlanView plan={plan} />
+        </section>
+      ) : null}
     </>
-  );
-}
-
-function AnomalyReport({
-  autoBlockMode,
-  comparison,
-  guideMode,
-  onAutoBlockModeChange,
-  onGuideModeChange,
-  plan,
-}: {
-  autoBlockMode: AutoBlockMode;
-  comparison: StrategyComparison | undefined;
-  guideMode: GuideRuleMode;
-  onAutoBlockModeChange: (mode: AutoBlockMode) => void;
-  onGuideModeChange: (mode: GuideRuleMode) => void;
-  plan: TraderOptimizationPlan | undefined;
-}) {
-  return (
-    <section className="panel">
-      <div className="section-head">
-        <div>
-          <h3>특이점 시나리오 Report</h3>
-          <p>D 전략은 신호 빈도보다 거짓 신호, 슬리피지, 빠른 이탈 규칙을 더 엄격하게 봐야 합니다.</p>
-        </div>
-        <div className="operation-toggles">
-          <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
-          <AutoBlockToggle mode={autoBlockMode} onChange={onAutoBlockModeChange} />
-        </div>
-      </div>
-      {comparison ? <MetricStrip result={comparison.bestResult} /> : <div className="empty-state">결과가 아직 없습니다.</div>}
-      {plan ? <OptimizationPlanView plan={plan} /> : null}
-    </section>
   );
 }
 
@@ -992,7 +900,7 @@ function DailyOperationView({
   onAutoBlockModeChange: (mode: AutoBlockMode) => void;
   onChartIntervalChange: (interval: ChartInterval) => void;
   onGuideModeChange: (mode: GuideRuleMode) => void;
-  onOpenMarket: (market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary) => void;
+  onOpenMarket: (market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) => void;
   onOpenOperation: (tab: OperationPopupTab) => void;
   plan: TraderOptimizationPlan | undefined;
   paperResult: DailyPaperResult | undefined;
@@ -1053,16 +961,16 @@ function DailyOperationView({
           </div>
         </div>
         <div className="watch-grid" aria-label="Daily operation markets">
-          {entries.map(({ candles, currentReturn, label, market, tradeSummary, trades }) => {
+          {entries.map(({ candles, currentReturn, dayStartMs, label, market, tradeSummary, trades }) => {
             const aggregated = aggregateCandles(candles, chartInterval);
 
             return (
               <article
                 className="symbol-card"
                 key={market}
-                onClick={() => onOpenMarket(market, trades, currentReturn, tradeSummary)}
+                onClick={() => onOpenMarket(market, trades, currentReturn, tradeSummary, dayStartMs)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") onOpenMarket(market, trades, currentReturn, tradeSummary);
+                  if (event.key === "Enter" || event.key === " ") onOpenMarket(market, trades, currentReturn, tradeSummary, dayStartMs);
                 }}
                 role="button"
                 tabIndex={0}
@@ -1075,9 +983,9 @@ function DailyOperationView({
                 </div>
                 <div className="symbol-meta">
                   <span>{label}</span>
-                  <strong className={tradeSummary.returnRate >= 0 ? "gain" : "loss"}>{formatTradeSummary(tradeSummary)}</strong>
+                  <strong style={{ color: tradeSummary.returnRate > 0 ? "#7dd3fc" : tradeSummary.returnRate < 0 ? "#ef8181" : "#ffffff" }}>{formatTradeSummary(tradeSummary)}</strong>
                 </div>
-                <MarketChart candles={aggregated} interval={chartInterval} themeMode={themeMode} trades={trades} variant="mini" />
+                <MarketChart candles={aggregated} dayStartMs={dayStartMs} interval={chartInterval} themeMode={themeMode} trades={trades} variant="mini" />
               </article>
             );
           })}
@@ -1092,6 +1000,7 @@ function DailyOperationView({
 function MarketInfoPopup({
   candles,
   currentReturn,
+  dayStartMs,
   interval,
   market,
   onClose,
@@ -1102,6 +1011,7 @@ function MarketInfoPopup({
 }: {
   candles: Candle[];
   currentReturn: number;
+  dayStartMs: number | undefined;
   interval: ChartInterval;
   market: string;
   onClose: () => void;
@@ -1129,6 +1039,7 @@ function MarketInfoPopup({
         </div>
         <MarketChart
           candles={aggregated}
+          dayStartMs={dayStartMs}
           interval={interval}
           metrics={{
             detail: formatTradeSummary(tradeSummary),
@@ -1462,21 +1373,65 @@ function GuideModeComparisonView({ guideModeComparisons }: { guideModeComparison
   );
 }
 
+type OptSortKey = "pick" | "market" | "candidate" | "scenario" | "return" | "maxdd" | "rejected";
+
 function OptimizationPlanView({ limit, plan }: { limit?: number; plan: TraderOptimizationPlan }) {
-  const selectedMarkets = limit ? plan.selectedMarkets.slice(0, limit) : plan.selectedMarkets;
+  const [sortKey, setSortKey] = useState<OptSortKey>("return");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const base = limit ? plan.selectedMarkets.slice(0, limit) : plan.selectedMarkets;
+
+  const sorted = base.slice().sort((a, b) => {
+    let cmp = 0;
+    switch (sortKey) {
+      case "pick":      cmp = (a.candidateRank ?? 0) - (b.candidateRank ?? 0); break;
+      case "market":    cmp = shortMarket(a.market).localeCompare(shortMarket(b.market)); break;
+      case "candidate": cmp = (a.candidateRank ?? 0) - (b.candidateRank ?? 0); break;
+      case "scenario":  cmp = (a.bestResult.scenarioName ?? "").localeCompare(b.bestResult.scenarioName ?? ""); break;
+      case "return":    cmp = a.bestResult.returnRate - b.bestResult.returnRate; break;
+      case "maxdd":     cmp = a.bestResult.maxDrawdown - b.bestResult.maxDrawdown; break;
+      case "rejected":  cmp = (a.bestResult.guideRejectedSignals ?? 0) - (b.bestResult.guideRejectedSignals ?? 0); break;
+    }
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  function handleSort(key: OptSortKey) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "return" ? "desc" : "asc");
+    }
+  }
+
+  function SortHeader({ label, col }: { label: string; col: OptSortKey }) {
+    const active = sortKey === col;
+    const arrow = active ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+    return (
+      <span
+        role="button"
+        tabIndex={0}
+        onClick={() => handleSort(col)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") handleSort(col); }}
+        style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: active ? "var(--accent)" : undefined }}
+      >
+        {label}{arrow}
+      </span>
+    );
+  }
 
   return (
     <div className="optimization-table">
       <div className="optimization-row header">
-        <span>Pick</span>
-        <span>Market</span>
-        <span>Candidate</span>
-        <span>Scenario</span>
-        <span>Return</span>
-        <span>Max DD</span>
-        <span>Rejected</span>
+        <SortHeader label="Pick"      col="pick" />
+        <SortHeader label="Market"    col="market" />
+        <SortHeader label="Candidate" col="candidate" />
+        <SortHeader label="Scenario"  col="scenario" />
+        <SortHeader label="Return"    col="return" />
+        <SortHeader label="Max DD"    col="maxdd" />
+        <SortHeader label="Rejected"  col="rejected" />
       </div>
-      {selectedMarkets.map((item, index) => (
+      {sorted.map((item, index) => (
         <div className="optimization-row" key={item.market}>
           <span>{index + 1}</span>
           <span>{shortMarket(item.market)}</span>
@@ -1694,9 +1649,9 @@ function LogicReviewPanel() {
         <strong>Review</strong>
       </div>
       <div className="logic-grid">
-        <InfoTile title="General 업데이트" value="walk-forward 검증, 수수료/슬리피지 반영, 손절/트레일링 조합, 과최적화 패널티가 필요합니다." />
-        <InfoTile title="특이점 정의" value="현재 로직은 상대 거래대금, 가격 가속, 단기 돌파, 과열 패널티를 이상 신호로 봅니다." />
-        <InfoTile title="매매 타이밍" value="A는 추세 지속, B는 평균회귀, C는 상대가치 회귀, D는 이상 신호와 빠른 이탈 중심입니다." />
+        <InfoTile title="특이점 정의" value="10분 가격변동 > 10% AND 10분 거래대금 > 직전 1시간 평균의 3배. 2시간 쿨다운으로 중복 카운트 방지." />
+        <InfoTile title="전략 타이밍" value="A는 조용한 구간 후 첫 충동, B는 폭발 캔들 즉시, C는 폭발 다음 봉 확인 후, D는 가속+거래량 스파이크." />
+        <InfoTile title="공통 리스크" value="슬리피지와 빠른 반전이 주요 리스크. trailingStop과 maxHold를 전일 이벤트 크기에 맞게 적응시킵니다." />
       </div>
     </section>
   );
@@ -1960,7 +1915,8 @@ function buildDailyEntries(
 
         return {
           ...item,
-          candles: dailyCandles,
+          candles: item.candles, // all candles (pre-midnight + today) for chart continuity
+          dayStartMs: dayStart,
           autoBlock,
           blockedBuyCount,
           currentReturn,
@@ -2484,9 +2440,9 @@ function getScreenTitle(screenId: ScreenId) {
 }
 
 function loadStoredScreenId(): ScreenId {
-  if (typeof window === "undefined") return "report-summary";
+  if (typeof window === "undefined") return "report-anomaly";
   const stored = window.localStorage.getItem(screenStorageKey);
-  return isScreenId(stored) ? stored : "report-summary";
+  return isScreenId(stored) ? stored : "report-anomaly";
 }
 
 function isScreenId(value: unknown): value is ScreenId {
@@ -2494,10 +2450,10 @@ function isScreenId(value: unknown): value is ScreenId {
 }
 
 function getScreenKicker(screenId: ScreenId) {
-  if (screenId.startsWith("scenario")) return "Scenario Builder";
-  if (screenId.startsWith("report")) return "Report";
-  if (screenId.startsWith("daily")) return "Daily Operation";
-  return "Account";
+  if (screenId.startsWith("scenario")) return "전략 개요";
+  if (screenId.startsWith("report")) return "시뮬레이션 결과";
+  if (screenId.startsWith("daily")) return "Daily 운영";
+  return "";
 }
 
 function isSameInterval(a: ChartInterval, b: ChartInterval) {

@@ -8,14 +8,20 @@ import {
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
+  type ISeriesPrimitive,
+  type IPrimitivePaneRenderer,
+  type IPrimitivePaneView,
+  type SeriesAttachedParameter,
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
+import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { Candle, Trade } from "../types/trading";
 import { normalizeChartInterval, type ChartInterval } from "../data/candleAggregation";
 
 interface MarketChartProps {
   candles: Candle[];
+  dayStartMs?: number; // KST midnight timestamp — dims pre-midnight candles and draws a boundary marker
   interval: ChartInterval;
   metrics?: {
     detail?: string;
@@ -33,13 +39,14 @@ interface MeasurementPoints {
   p2: Candle | null;
 }
 
-export function MarketChart({ candles, interval, metrics, themeMode, trades = [], variant = "mini" }: MarketChartProps) {
+export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode, trades = [], variant = "mini" }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markerSeriesRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const dayLinePrimitiveRef = useRef<DayStartLinePrimitive | null>(null);
   const candlesByTimeRef = useRef<Map<Time, Candle>>(new Map());
   const [measurementPoints, setMeasurementPoints] = useState<MeasurementPoints>({ p1: null, p2: null });
   const normalizedInterval = useMemo(() => normalizeChartInterval(interval), [interval]);
@@ -202,6 +209,7 @@ export function MarketChart({ candles, interval, metrics, themeMode, trades = []
     });
 
     return () => {
+      dayLinePrimitiveRef.current = null; // chart destruction removes all primitives
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -218,25 +226,48 @@ export function MarketChart({ candles, interval, metrics, themeMode, trades = []
 
     const colors = getChartColors(themeMode);
     candleSeries.setData(
-      visibleCandles.map((candle) => ({
-        time: toChartTime(candle.timestamp),
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-      })),
+      visibleCandles.map((candle) => {
+        const isPre = dayStartMs !== undefined && candle.timestamp < dayStartMs;
+        return {
+          time: toChartTime(candle.timestamp),
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          ...(isPre ? {
+            color:       colors.preDay,
+            wickColor:   colors.preDay,
+            borderColor: colors.preDay,
+          } : {}),
+        };
+      }),
     );
 
     volumeSeries.setData(
-      visibleCandles.map((candle) => ({
-        time: toChartTime(candle.timestamp),
-        value: candle.quoteVolume,
-        color: candle.close >= candle.open ? colors.volumeUp : colors.volumeDown,
-      })),
+      visibleCandles.map((candle) => {
+        const isPre = dayStartMs !== undefined && candle.timestamp < dayStartMs;
+        return {
+          time: toChartTime(candle.timestamp),
+          value: candle.quoteVolume,
+          color: isPre ? colors.preDayVolume : (candle.close >= candle.open ? colors.volumeUp : colors.volumeDown),
+        };
+      }),
     );
 
     chart.timeScale().fitContent();
-  }, [themeMode, visibleCandles]);
+
+    // Attach / re-attach the vertical day-start line primitive
+    if (dayLinePrimitiveRef.current) {
+      candleSeries.detachPrimitive(dayLinePrimitiveRef.current);
+      dayLinePrimitiveRef.current = null;
+    }
+    if (dayStartMs !== undefined) {
+      const lineColor = themeMode === "dark" ? "rgba(124, 106, 247, 0.8)" : "rgba(100, 85, 220, 0.8)";
+      const primitive = new DayStartLinePrimitive(toChartTime(dayStartMs), lineColor);
+      candleSeries.attachPrimitive(primitive);
+      dayLinePrimitiveRef.current = primitive;
+    }
+  }, [themeMode, visibleCandles, dayStartMs]);
 
   useEffect(() => {
     const markerSeries = markerSeriesRef.current;
@@ -246,8 +277,9 @@ export function MarketChart({ candles, interval, metrics, themeMode, trades = []
     markerSeries.setMarkers([
       ...createTradeMarkers(trades, visibleCandles, themeMode, variant),
       ...(variant === "large" ? createMeasurementMarkers(measurementPoints, visibleTimes, themeMode) : []),
+      ...createDayStartMarker(dayStartMs, visibleCandles),
     ]);
-  }, [measurementPoints, themeMode, trades, variant, visibleCandles]);
+  }, [dayStartMs, measurementPoints, themeMode, trades, variant, visibleCandles]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     if (candles.length <= visibleCandles.length) return;
@@ -439,9 +471,10 @@ function fromChartTime(time: Time) {
 }
 
 function formatChartTimeLabel(time: Time) {
-  return new Intl.DateTimeFormat("ko-KR", {
+  return new Intl.DateTimeFormat("en-US", {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
     timeZone: "Asia/Seoul",
   }).format(new Date(fromChartTime(time)));
 }
@@ -526,6 +559,77 @@ function formatElapsedTime(milliseconds: number) {
   return `${minutes}m`;
 }
 
+// ── Vertical day-start line primitive ───────────────────────────────────────
+
+class DayStartLineRenderer implements IPrimitivePaneRenderer {
+  constructor(private _x: number | null, private _color: string) {}
+
+  draw(target: CanvasRenderingTarget2D): void {
+    if (this._x === null) return;
+    target.useBitmapCoordinateSpace(({ context: ctx, horizontalPixelRatio, verticalPixelRatio, mediaSize }) => {
+      const bx = Math.round(this._x! * horizontalPixelRatio);
+      const bh = Math.round(mediaSize.height * verticalPixelRatio);
+      const dash = Math.round(4 * verticalPixelRatio);
+      ctx.save();
+      ctx.strokeStyle = this._color;
+      ctx.lineWidth = Math.round(horizontalPixelRatio);
+      ctx.setLineDash([dash, dash]);
+      ctx.globalAlpha = 0.75;
+      ctx.beginPath();
+      ctx.moveTo(bx, 0);
+      ctx.lineTo(bx, bh);
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
+}
+
+class DayStartLinePaneView implements IPrimitivePaneView {
+  private _x: number | null = null;
+  constructor(private _color: string) {}
+  update(x: number | null): void { this._x = x; }
+  renderer(): IPrimitivePaneRenderer { return new DayStartLineRenderer(this._x, this._color); }
+  zOrder() { return "normal" as const; }
+}
+
+class DayStartLinePrimitive implements ISeriesPrimitive<Time> {
+  private _chart: IChartApi | null = null;
+  private _paneView: DayStartLinePaneView;
+
+  constructor(private _time: Time, color: string) {
+    this._paneView = new DayStartLinePaneView(color);
+  }
+
+  attached({ chart }: SeriesAttachedParameter<Time>): void { this._chart = chart; }
+  detached(): void { this._chart = null; }
+
+  updateAllViews(): void {
+    if (!this._chart) return;
+    this._paneView.update(this._chart.timeScale().timeToCoordinate(this._time));
+  }
+
+  paneViews(): readonly IPrimitivePaneView[] { return [this._paneView]; }
+}
+
+// ── Day-start text marker (small square at the candle) ───────────────────────
+
+function createDayStartMarker(dayStartMs: number | undefined, visibleCandles: Candle[]): SeriesMarker<Time>[] {
+  if (!dayStartMs) return [];
+  // Find the first candle at or after midnight KST
+  const midnightCandle = visibleCandles.find((c) => c.timestamp >= dayStartMs);
+  if (!midnightCandle) return [];
+  return [
+    {
+      time: toChartTime(midnightCandle.timestamp),
+      position: "belowBar",
+      shape: "square",
+      color: "#7c6af7",
+      text: "00:00",
+      size: 0,
+    },
+  ];
+}
+
 function getChartColors(themeMode: "light" | "dark") {
   if (themeMode === "dark") {
     return {
@@ -536,6 +640,8 @@ function getChartColors(themeMode: "light" | "dark") {
       down: "#ef8181",
       volumeUp: "rgba(107, 208, 164, 0.32)",
       volumeDown: "rgba(239, 129, 129, 0.32)",
+      preDay: "rgba(169, 186, 179, 0.28)",
+      preDayVolume: "rgba(169, 186, 179, 0.12)",
     };
   }
 
@@ -547,5 +653,7 @@ function getChartColors(themeMode: "light" | "dark") {
     down: "#c44e4e",
     volumeUp: "rgba(22, 128, 90, 0.34)",
     volumeDown: "rgba(196, 78, 78, 0.32)",
+    preDay: "rgba(101, 117, 111, 0.30)",
+    preDayVolume: "rgba(101, 117, 111, 0.12)",
   };
 }

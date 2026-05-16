@@ -32,7 +32,12 @@
  *   node scripts/anomaly-variants-sim.mjs --loop=60000 (continuous, 60s interval)
  */
 
+import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { runOptimization, type OptimizedParams } from "./optimize-params";
+
+const execAsync = promisify(exec);
 import path from "node:path";
 import { runPaperTradingSimulation } from "../src/simulation/paperTrading";
 import { runBacktest, defaultBacktestConfig } from "../src/simulation/backtest";
@@ -45,13 +50,18 @@ import type {
 import type { TraderOptimizationPlan, MarketScenarioOptimization } from "../src/simulation/traderOptimization";
 
 // ─── paths ────────────────────────────────────────────────────────────────────
-const root          = process.cwd();   // C:\Claude\Crypto-Anomaly
-const anomaly1mPath = path.join(root, "data", "market", "upbit-krw-1m-anomaly.json");
-const histPath      = path.join(root, "data", "market", "upbit-krw-5m.json");
-const outputDir     = path.join(root, "public", "market");
-const paperPath     = path.join(outputDir, "paper-trading-1m-daily-results.json");
-const dashPath      = path.join(outputDir, "dashboard-results.json");
-const selectionPath = path.join(outputDir, "anomaly-selection.json");
+const root              = process.cwd();   // C:\Claude\Crypto-Anomaly
+const anomaly1mPath     = path.join(root, "data", "market", "upbit-krw-1m-anomaly.json");
+const histPath          = path.join(root, "data", "market", "upbit-krw-5m.json");
+const outputDir         = path.join(root, "public", "market");
+const paperPath         = path.join(outputDir, "paper-trading-1m-daily-results.json");
+const dashPath          = path.join(outputDir, "dashboard-results.json");
+const selectionPath     = path.join(outputDir, "anomaly-selection.json");
+const daily1mPath       = path.join(outputDir, "upbit-krw-1m-daily.json");
+const optimizedParamsPath = path.join(outputDir, "anomaly-optimized-params.json");
+
+// Per-coin optimized parameters loaded at 00:00. Keyed by market → slotId → params.
+let perCoinParams: OptimizedParams = {};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 const GUIDE_MODES        = ["ignored", "strict"] as GuideRuleMode[];
@@ -271,9 +281,11 @@ function buyAt(reasons: string[], sl: number, tp: number, trail: number, maxH: n
 // ─── Anomaly-A: S3-CalmImpulse ───────────────────────────────────────────────
 function decideA(ctx: StrategyContext, scenario: StrategyScenario): StrategyDecision {
   const { candles, candleIndex: i, position } = ctx;
-  const ind     = getInd(candles);
-  const trail   = scenario.params.trailingStopPct ?? 0.028;
-  const maxHold = scenario.params.maxHoldCandles  ?? 12;
+  const ind      = getInd(candles);
+  const coinP    = perCoinParams[ctx.market]?.["momentum"];
+  const trail    = coinP?.trailingStopPct  ?? scenario.params.trailingStopPct ?? 0.028;
+  const maxHold  = coinP?.maxHoldCandles   ?? scenario.params.maxHoldCandles  ?? 12;
+  const curBodyMin = coinP?.curBodyMin ?? 0.015;
   if (i < 52) return hold("warming-up");
   if (position) {
     const avgVol = ind.avgVol48[i];
@@ -286,7 +298,7 @@ function decideA(ctx: StrategyContext, scenario: StrategyScenario): StrategyDeci
   const recentBodies = ind.bodies.slice(i - 15, i).map(Math.abs);
   const avgBody = recentBodies.reduce((s, v) => s + v, 0) / 15;
   const curBody = ind.bodies[i];
-  if (avgBody < 0.005 && curBody >= 0.015 && candles[i].close > candles[i].open
+  if (avgBody < 0.005 && curBody >= curBodyMin && candles[i].close > candles[i].open
     && candles[i].volume / avgVol >= 1.5 && Math.abs(roc48) < 0.05)
     return buyAt(["calm-impulse", `body+${(curBody * 100).toFixed(1)}%`], 0.018, 0.06, trail, maxHold);
   return hold("no-signal");
@@ -295,9 +307,11 @@ function decideA(ctx: StrategyContext, scenario: StrategyScenario): StrategyDeci
 // ─── Anomaly-B: S6-FirstExplosion ────────────────────────────────────────────
 function decideB(ctx: StrategyContext, scenario: StrategyScenario): StrategyDecision {
   const { candles, candleIndex: i, position } = ctx;
-  const ind     = getInd(candles);
-  const trail   = scenario.params.trailingStopPct ?? 0.018;
-  const maxHold = scenario.params.maxHoldCandles  ?? 6;
+  const ind      = getInd(candles);
+  const coinP    = perCoinParams[ctx.market]?.["range-grid"];
+  const trail    = coinP?.trailingStopPct ?? scenario.params.trailingStopPct ?? 0.018;
+  const maxHold  = coinP?.maxHoldCandles  ?? scenario.params.maxHoldCandles  ?? 6;
+  const bodyMin  = coinP?.bodyMin ?? 0.025;
   if (i < 52) return hold("warming-up");
   if (position) {
     const avgVol = ind.avgVol48[i];
@@ -306,24 +320,31 @@ function decideB(ctx: StrategyContext, scenario: StrategyScenario): StrategyDeci
     if (fade || rev || position.holdCandles >= maxHold) return sell(fade ? "volume-fade" : rev ? "reversal" : "time-stop");
     return hold("holding");
   }
-  const avgVol = ind.avgVol48[i]; const roc48 = ind.roc48[i];
-  if (avgVol === null || roc48 === null) return hold("no-data");
+  const avgVol = ind.avgVol48[i];
+  if (avgVol === null) return hold("no-data");
   let calm = true;
   for (let k = 1; k <= 3; k++) {
     if (Math.abs(ind.bodies[i - k]) > 0.008 || candles[i - k].volume / avgVol > 1.6) { calm = false; break; }
   }
+  // 5분 전 대비 현재 직전까지의 상승폭 (폭발 캔들 자체 제외).
+  // 추격 매수 방지: 이미 5분간 5% 이상 올랐으면 진입 안 함.
+  const pre5Close = candles[Math.max(0, i - 6)].close;
+  const pre1Close = candles[i - 1].close;
+  const preRoc5   = pre5Close > 0 ? Math.abs((pre1Close - pre5Close) / pre5Close) : 0;
   const body = ind.bodies[i]; const volR = candles[i].volume / avgVol; const topR = ind.topRatio[i];
-  if (calm && body >= 0.025 && volR >= 3.5 && topR >= 0.60 && Math.abs(roc48) < 0.035)
-    return buyAt(["explosion-candle", `vol×${volR.toFixed(1)}`, `body+${(body * 100).toFixed(1)}%`], 0.015, 0.045, trail, maxHold);
+  if (calm && body >= bodyMin && volR >= 3.5 && topR >= 0.60 && preRoc5 < 0.05)
+    return buyAt(["explosion-candle", `vol×${volR.toFixed(1)}`, `body+${(body * 100).toFixed(1)}%`, `pre5+${(preRoc5 * 100).toFixed(1)}%`], 0.015, 0.045, trail, maxHold);
   return hold("no-signal");
 }
 
 // ─── Anomaly-C: S7-ConfirmedBurst ────────────────────────────────────────────
 function decideC(ctx: StrategyContext, scenario: StrategyScenario): StrategyDecision {
   const { candles, candleIndex: i, position } = ctx;
-  const ind     = getInd(candles);
-  const trail   = scenario.params.trailingStopPct ?? 0.022;
-  const maxHold = scenario.params.maxHoldCandles  ?? 8;
+  const ind           = getInd(candles);
+  const coinP         = perCoinParams[ctx.market]?.["arbitrage"];
+  const trail         = coinP?.trailingStopPct  ?? scenario.params.trailingStopPct ?? 0.022;
+  const maxHold       = coinP?.maxHoldCandles   ?? scenario.params.maxHoldCandles  ?? 8;
+  const confirmVolMin = coinP?.confirmVolMin ?? 1.8;
   if (i < 53) return hold("warming-up");
   if (position) {
     const avgVol = ind.avgVol48[i];
@@ -332,29 +353,54 @@ function decideC(ctx: StrategyContext, scenario: StrategyScenario): StrategyDeci
     if (fade || rev || position.holdCandles >= maxHold) return sell(fade ? "volume-fade" : rev ? "reversal" : "time-stop");
     return hold("holding");
   }
-  const avgVol = ind.avgVol48[i]; const roc48 = ind.roc48[i];
-  if (avgVol === null || roc48 === null) return hold("no-data");
+  const avgVol = ind.avgVol48[i];
+  if (avgVol === null) return hold("no-data");
   const prevBody = ind.bodies[i - 1]; const prevTop = ind.topRatio[i - 1];
-  const prevVol  = candles[i - 1].volume / avgVol; const prevExt = ind.roc48[i - 1];
+  const prevVol  = candles[i - 1].volume / avgVol;
   let calm = true;
   for (let k = 2; k <= 4; k++) {
     if (Math.abs(ind.bodies[i - k]) > 0.008 || candles[i - k].volume / avgVol > 1.6) { calm = false; break; }
   }
-  const prevExploded = calm && prevBody >= 0.025 && prevTop >= 0.60 && prevVol >= 3.5 && (prevExt ?? 1) < 0.035;
+  // 폭발 봉(i-1) 이전 5분간 상승폭 확인 — 이미 5% 이상 올랐으면 B 조건 자체가 성립 안 된 것
+  const prev5Close = candles[Math.max(0, i - 7)].close;
+  const prev2Close = candles[i - 2].close;
+  const prevPreRoc5 = prev5Close > 0 ? Math.abs((prev2Close - prev5Close) / prev5Close) : 0;
+  const prevExploded = calm && prevBody >= 0.025 && prevTop >= 0.60 && prevVol >= 3.5 && prevPreRoc5 < 0.05;
   if (!prevExploded) return hold("no-prev-explosion");
   const curVol = candles[i].volume / avgVol;
-  if (curVol >= 1.8 && ind.bodies[i] >= 0 && candles[i].close >= candles[i - 1].close)
+  if (curVol >= confirmVolMin && ind.bodies[i] >= 0 && candles[i].close >= candles[i - 1].close)
     return buyAt(["confirmed-burst", `prev×${prevVol.toFixed(1)}`, `cur×${curVol.toFixed(1)}`], 0.018, 0.055, trail, maxHold);
   return hold("no-confirm");
 }
 
-// ─── Anomaly-D: Sweep-best (baseline) ────────────────────────────────────────
+// ─── Anomaly-D: Sweep-best wrapper — injects per-coin params into scenario ────
+function decideD(ctx: StrategyContext, sc: StrategyScenario): StrategyDecision {
+  const coinP = perCoinParams[ctx.market]?.["anomaly"];
+  if (!coinP) return anomalyStrategy.decide(ctx, sc);
+  return anomalyStrategy.decide(ctx, {
+    ...sc,
+    params: {
+      ...sc.params,
+      trailingStopPct:  coinP.trailingStopPct,
+      maxHoldCandles:   coinP.maxHoldCandles,
+      accelerationMin:  coinP.accelerationMin ?? sc.params.accelerationMin,
+    },
+  });
+}
+
 function makeSweepBestScenario(adapted: AdaptedParams): StrategyScenario {
   return {
     ...anomalyScenario,
     id: "anomaly-sweep-best",
     name: "Sweep-best",
-    params: { ...anomalyScenario.params, trailingStopPct: adapted.trailingStopPct },
+    params: {
+      ...anomalyScenario.params,
+      trailingStopPct:   adapted.trailingStopPct,
+      // 1m 캔들 기준 재조정: 3분 ROC 2% (원래 4.5%는 5m 기준)
+      accelerationMin:   0.020,
+      // 48분 과열 기준도 완화 (1m에서 pump 자체가 18% 내에 들어올 수 있음)
+      maxExtendedMove:   0.25,
+    },
   };
 }
 
@@ -396,6 +442,7 @@ function buildVariants(adaptedParams: Record<TraderId, AdaptedParams>): Variant[
         ...anomalyStrategy,
         id: "anomaly", name: "Anomaly-D / Sweep Best",
         scenarios: [sweepBestSc], defaultScenario: sweepBestSc,
+        decide: decideD,
       },
       scenario: sweepBestSc,
     },
@@ -458,6 +505,14 @@ function buildOptimizationPlan(
 
 // ─── main cycle ───────────────────────────────────────────────────────────────
 async function runCycle() {
+  // Auto-fetch fresh 1m candle data before each simulation cycle.
+  // Errors are non-fatal — simulation continues with cached data.
+  try {
+    await execAsync("node scripts/fetch-anomaly-1m.mjs", { cwd: root });
+  } catch (e: any) {
+    console.error(`[fetch] 1m data fetch failed (using cached): ${String(e?.message ?? e).slice(0, 120)}`);
+  }
+
   // Load live 1m data: prefer anomaly-specific file (fetch:anomaly:1m),
   // fall back to Codex's shared file (fewer markets, but always available).
   let rawLive: any;
@@ -475,6 +530,16 @@ async function runCycle() {
 
   const live1m: Record<string, Candle[]> = rawLive.candlesByMarket ?? {};
   const hist5m: Record<string, Candle[]> = rawHist.candlesByMarket ?? {};
+
+  // Load per-coin optimized params (from last midnight run)
+  try {
+    const saved = JSON.parse(await readFile(optimizedParamsPath, "utf8"));
+    if (saved.date === kstDateString()) {
+      perCoinParams = saved.params ?? {};
+      const n = Object.keys(perCoinParams).length;
+      if (n > 0) console.log(`  Loaded per-coin optimized params: ${n} markets`);
+    }
+  } catch { /* not yet generated — will be created at next midnight */ }
 
   const sampleMarket  = Object.keys(live1m)[0] ?? "";
   const sampleCandles = live1m[sampleMarket]    ?? [];
@@ -532,6 +597,16 @@ async function runCycle() {
         ? +(yesterdayEvents.map(e => e.priceMoveRatio).sort((a,b)=>a-b)[Math.floor(yesterdayEvents.length/2)] * 100).toFixed(1)
         : null,
     }) + "\n", "utf8");
+
+    // Per-coin parameter optimization using yesterday's 1m data
+    try {
+      const optResult = await runOptimization(live1m, yesterdayStart, yesterdayEnd, marketNames, today);
+      perCoinParams = optResult.params;
+      await writeFile(optimizedParamsPath, JSON.stringify(optResult) + "\n", "utf8");
+      console.log(`  ✓ ${path.relative(root, optimizedParamsPath)}  (${(optResult.durationMs / 1000).toFixed(1)}s)`);
+    } catch (e: any) {
+      console.error(`  [opt] optimization failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
   }
 
   const marketNames = selectedMarkets.map(m => m.market);
@@ -560,11 +635,17 @@ async function runCycle() {
   // Build variants with (possibly adapted) parameters
   const variants = buildVariants(adaptedParams!);
 
-  // Today's 1m candles (from 00:00 KST)
+  // Candles for chart: today (00:00 KST) + 3h of yesterday for continuity
+  const rollingStartMs = kstTodayStartMs() - 3 * 3_600_000;
   const allTodayMap: Record<string, Candle[]> = {};
-  for (const m of marketNames) allTodayMap[m] = todayCandles(live1m[m] ?? []);
+  for (const m of marketNames) allTodayMap[m] = (live1m[m] ?? []).filter(c => c.timestamp >= rollingStartMs);
   const todayCandleCount = allTodayMap[marketNames[0]]?.length ?? 0;
-  console.log(`\n  Today's 1m candles since 00:00 KST: ~${todayCandleCount} per market`);
+  // Total unique timestamps across all markets (Upbit 1m candles have per-market millisecond offsets,
+  // so the union of 16 markets is much larger than any single market's count).
+  const allTodayTimestamps = new Set<number>();
+  for (const m of marketNames) for (const c of allTodayMap[m] ?? []) allTodayTimestamps.add(c.timestamp);
+  const totalTimestamps = allTodayTimestamps.size;
+  console.log(`\n  Today's 1m candles since 00:00 KST: ~${todayCandleCount} per market (${totalTimestamps} unique timestamps across all markets)`);
   console.log(`  Paper sim universe: ${marketNames.length} markets (all 4 variants)\n`);
 
   // ── Build plans + run paper sims ──────────────────────────────────────────
@@ -579,7 +660,7 @@ async function runCycle() {
 
       const result = runPaperTradingSimulation(v.strategy, plan, allTodayMap, {
         guideRuleMode,
-        maxCandles: todayCandleCount + 1,
+        maxCandles: totalTimestamps + 1, // cover all candles across all markets
       });
 
       paperResults[guideRuleMode][v.slotId] = result;
@@ -661,8 +742,19 @@ async function runCycle() {
   };
   await writeFile(dashPath, `${JSON.stringify(dashOutput)}\n`, "utf8");
 
+  // ③ upbit-krw-1m-daily.json — today's 1m candles for Daily 운영 UI
+  const daily1mOutput = {
+    source:             "upbit-public-api",
+    generatedAt:        new Date().toISOString(),
+    candleUnitMinutes:  1,
+    selectedMarkets:    marketNames,
+    candlesByMarket:    allTodayMap,
+  };
+  await writeFile(daily1mPath, `${JSON.stringify(daily1mOutput)}\n`, "utf8");
+
   console.log(`\n  ✓ ${path.relative(root, paperPath)}`);
   console.log(`  ✓ ${path.relative(root, dashPath)}`);
+  console.log(`  ✓ ${path.relative(root, daily1mPath)}`);
   if (isNewSelection) console.log(`  ✓ ${path.relative(root, selectionPath)}`);
 }
 
