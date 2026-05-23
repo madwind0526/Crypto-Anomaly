@@ -34,7 +34,7 @@ export const traderProfiles: TraderProfile[] = [
     id: "anomaly",
     name: "Anomaly-D / Sweep Best",
     summary: "기존 특이점 전략에 최적화된 trailingStop(0.018)을 적용한 베이스라인입니다. 비교 기준점 역할.",
-    strengths: ["다양한 시장 조건 대응", "trailing stop으로 수익 보호", "12개 감시 종목 전체 커버"],
+    strengths: ["다양한 시장 조건 대응", "trailing stop으로 수익 보호", "9개 감시 종목 집중 커버"],
     risks: ["높은 거짓 신호율", "급락과 슬리피지", "시장 조작 위험"],
   },
 ];

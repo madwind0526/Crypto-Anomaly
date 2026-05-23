@@ -1,0 +1,13 @@
+﻿ M CLAUDE.md
+ M public/market/anomaly-selection.json
+ M public/market/dashboard-results.json
+ M public/market/paper-trading-1m-daily-results.json
+ M scripts/anomaly-variants-sim.ts
+ M scripts/ws-live.mjs
+ M src/app/App.tsx
+ M src/styles.css
+ M vite.config.ts
+?? data/
+?? public/market/anomaly-ws-compare.json
+?? vite-start.log
+?? ws-live.log

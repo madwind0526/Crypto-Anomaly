@@ -1,7 +1,7 @@
 import { createSampleMarketSet } from "./sampleData";
 import type { StrategyComparison, StrategyGuideModeComparison } from "../simulation/optimizer";
 import type { TraderOptimizationPlan } from "../simulation/traderOptimization";
-import type { Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
+import type { BlockedSignal, Candle, GuideRuleMode, SafetyMode, Trade, TraderId } from "../types/trading";
 
 export interface DashboardMarketData {
   source: string;
@@ -29,6 +29,10 @@ export interface DailyPaperResult {
   initialCash: number;
   finalValue: number;
   returnRate: number;
+  autoBlockMode?: SafetyMode;
+  blockedSignals?: BlockedSignal[];
+  safetyBlockedByMarket?: Record<string, number>;
+  safetyBlockedSignals?: number;
   trades: Trade[];
   decisions: Array<{
     timestamp: number;
@@ -52,7 +56,9 @@ export interface DailyPaperResultsPayload {
     selectedMarkets?: string[];
   };
   maxCandles: number;
+  rows?: Array<Record<string, unknown>>;
   results: Record<GuideRuleMode, Partial<Record<TraderId, DailyPaperResult>>>;
+  caseResults?: Record<GuideRuleMode, Record<SafetyMode, Partial<Record<TraderId, DailyPaperResult>>>>;
 }
 
 interface UpbitMarketCachePayload {

@@ -4,6 +4,8 @@ export type DecisionAction = "hold" | "buy" | "sell";
 
 export type GuideRuleMode = "strict" | "ignored";
 
+export type SafetyMode = "enabled" | "disabled";
+
 export type GuideTrendState = "uptrend" | "downtrend" | "sideways" | "unknown";
 
 export type GuideMovingAverageState = "bullish" | "bearish" | "mixed" | "unknown";
@@ -55,6 +57,7 @@ export interface StrategyContext {
   candleIndex: number;
   position: Position | null;
   portfolioValue: number;
+  lastSellPrice?: number;
 }
 
 export interface StrategyScenario {
@@ -86,6 +89,17 @@ export interface Trade {
   guideRuleEvaluation?: GuideRuleEvaluation;
 }
 
+export type BlockedSignalReason = "guide-rule" | "safety";
+
+export interface BlockedSignal {
+  market: string;
+  timestamp: number;
+  reason: BlockedSignalReason;
+  reasonCodes: string[];
+  guideRuleMode?: GuideRuleMode;
+  safetyMode?: SafetyMode;
+}
+
 export interface Position {
   market: string;
   quantity: number;
@@ -100,6 +114,7 @@ export interface BacktestConfig {
   feeRate: number;
   slippageRate: number;
   guideRuleMode?: GuideRuleMode;
+  autoBlockMode?: SafetyMode;
 }
 
 export interface SignalAudit {

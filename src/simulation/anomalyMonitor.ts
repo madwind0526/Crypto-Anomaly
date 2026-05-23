@@ -37,7 +37,7 @@ export interface DailyAnomalyMonitoringPlan {
 }
 
 const defaultOptions: AnomalyMonitorOptions = {
-  monitoringMarketCount: 12,
+  monitoringMarketCount: 9,
   candidatePoolCount: 30,
   volumeLookbackCandles: 24,
   minRelativeVolume: 2.2,

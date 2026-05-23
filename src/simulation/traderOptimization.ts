@@ -39,7 +39,7 @@ export interface TraderOptimizationPlan {
 
 const defaultOptions: TraderOptimizationOptions = {
   candidateMarketCount: 30,
-  monitoringMarketCount: 12,
+  monitoringMarketCount: 9,
   tradeValueLookbackCandles: 288,
   optimizationLookbackCandles: Number.POSITIVE_INFINITY,
   minCandles: 120,

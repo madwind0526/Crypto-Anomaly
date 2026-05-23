@@ -1,0 +1,234 @@
+﻿diff --git a/CLAUDE.md b/CLAUDE.md
+index c1211a1..1267e1b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -1,3 +1,10 @@
+ # CLAUDE.md
+ 
+-새 세션을 시작하기 전에 **PROGRESS.md**를 먼저 읽고 이전 작업 이력과 현재 상태를 파악한 후 이어서 작업할 것.
++새 세션을 시작하기 전에:
++1. **PROGRESS.md**를 읽고 이전 작업 이력과 현재 상태를 파악한 후 이어서 작업할 것.
++2. **`C:\Claude\MESSAGES.md`** 를 확인하여 `to: crypto-anomaly`이고 `status: pending`인 메시지가 있으면 처리하고 답장을 남길 것.
++
++## 이 프로젝트 ID: `crypto-anomaly`
++- 상대 프로젝트: `crypto-currency` (`C:\Claude\Crypto-Currency`)
++- 메시지를 보낼 때: `C:\Claude\MESSAGES.md`에 MSG-{다음번호} 형식으로 작성
++- 메시지를 받았을 때: 처리 후 해당 MSG의 status를 `done`으로 변경하고 답장 작성
+diff --git a/scripts/anomaly-variants-sim.ts b/scripts/anomaly-variants-sim.ts
+index 2df39fa..926d0f3 100644
+--- a/scripts/anomaly-variants-sim.ts
++++ b/scripts/anomaly-variants-sim.ts
+@@ -935,7 +935,7 @@ async function runCycle() {
+       candleUnitMinutes: rawLive.candleUnitMinutes ?? 1,
+       selectedMarkets:   marketNames,
+     },
+-    maxCandles: todayCandleCount,
++    maxCandles: totalTimestamps,
+     rows:       paperRows,
+     results:    paperResults,
+     wsFast,
+diff --git a/scripts/ws-live.mjs b/scripts/ws-live.mjs
+index d6f77e5..fc985ad 100644
+--- a/scripts/ws-live.mjs
++++ b/scripts/ws-live.mjs
+@@ -15,7 +15,7 @@ await build({
+   outfile,
+   platform: "node",
+   target: "node20",
+-  packages: "bundle",
++  packages: "external",   // keep ws (CJS) and other npm packages as runtime imports
+ });
+ 
+ try {
+diff --git a/src/app/App.tsx b/src/app/App.tsx
+index c891b36..ce4260a 100644
+--- a/src/app/App.tsx
++++ b/src/app/App.tsx
+@@ -950,11 +950,17 @@ function DailyOperationView({
+     [signals],
+   );
+ 
++  const [simRestarting, setSimRestarting] = useState(false);
++  async function handleSimRestart() {
++    setSimRestarting(true);
++    try { await fetch("/api/ws/restart", { method: "POST" }); } catch { /* ignore */ }
++    setTimeout(() => setSimRestarting(false), 3000);
++  }
++
+   const [wsViewMode, setWsViewMode] = useState<"ws-o" | "ws-x">("ws-x");
+   const wsO = wsLiveResults?.wsO?.[wsTraderId];
+   const wsX = wsLiveResults?.wsX?.[wsTraderId];
+   const wsConnected = wsLiveResults?.status === "connected";
+-  const wsDotColor  = wsConnected ? "#4ade80" : wsLiveResults ? "#f87171" : "#6b7280";
+   const wsStatusLabel = wsLiveResults
+     ? wsConnected ? `WS ● ${wsLiveResults.tickCount.toLocaleString()}t` : "WS ✕"
+     : "WS —";
+@@ -978,20 +984,20 @@ function DailyOperationView({
+             <p>{screen.description}</p>
+           </div>
+           <div className="operation-toggles">
+-            <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
+-            <AutoBlockToggle mode={autoBlockMode} onChange={onAutoBlockModeChange} />
+-            <div className="toggle-group ws-toggle-group">
+-              <span className="ws-status-dot" style={{ color: wsDotColor }} title={wsStatusLabel}>{wsStatusLabel}</span>
+-              <button
+-                className={wsViewMode === "ws-o" ? "active" : ""}
+-                onClick={() => setWsViewMode("ws-o")}
+-                type="button"
+-              >WS O</button>
++            <div className="segmented" aria-label="Operation controls">
++              <button className={guideMode === "strict" ? "active" : ""} onClick={() => onGuideModeChange("strict")} type="button">Guideline O</button>
++              <button className={guideMode === "ignored" ? "active" : ""} onClick={() => onGuideModeChange("ignored")} type="button">Guideline X</button>
++              <button className={autoBlockMode === "enabled" ? "active" : ""} onClick={() => onAutoBlockModeChange("enabled")} type="button">Safety O</button>
++              <button className={autoBlockMode === "disabled" ? "active" : ""} onClick={() => onAutoBlockModeChange("disabled")} type="button">Safety X</button>
++              <button className={wsViewMode === "ws-o" ? "active" : ""} onClick={() => setWsViewMode("ws-o")} title={wsStatusLabel} type="button">WS O</button>
++              <button className={wsViewMode === "ws-x" ? "active" : ""} onClick={() => setWsViewMode("ws-x")} title={wsStatusLabel} type="button">WS X</button>
+               <button
+-                className={wsViewMode === "ws-x" ? "active" : ""}
+-                onClick={() => setWsViewMode("ws-x")}
++                className={simRestarting ? "active" : ""}
++                disabled={simRestarting}
++                onClick={handleSimRestart}
++                title="Sim 루프를 재시작합니다"
+                 type="button"
+-              >WS X</button>
++              >{simRestarting ? "재시작 중…" : "WS 재실행"}</button>
+             </div>
+           </div>
+         </div>
+diff --git a/src/styles.css b/src/styles.css
+index e1d7af6..e3e7590 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -464,6 +464,27 @@ h4 {
+   color: #fff;
+ }
+ 
++.sim-restart-btn {
++  background: none;
++  border: 1px solid #555;
++  border-radius: 4px;
++  color: #aaa;
++  cursor: pointer;
++  font-size: 0.78rem;
++  padding: 4px 10px;
++  transition: background 0.15s, color 0.15s;
++}
++.sim-restart-btn:hover:not(:disabled) {
++  background: #333;
++  border-color: #888;
++  color: #fff;
++}
++.sim-restart-btn.restarting,
++.sim-restart-btn:disabled {
++  color: #666;
++  cursor: default;
++}
++
+ .daily-control-panel .info-tile {
+   gap: 4px;
+   min-width: 0;
+diff --git a/vite.config.ts b/vite.config.ts
+index cfcbc0e..09b803f 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,7 +1,9 @@
+ // @ts-nocheck
+ import { defineConfig } from "vite";
+ import react from "@vitejs/plugin-react";
+-import { spawn } from "node:child_process";
++import { spawn, execSync } from "node:child_process";
++import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
++import path from "node:path";
+ 
+ const refreshStepSets = {
+   general: [
+@@ -132,6 +134,87 @@ function sendJson(res, payload) {
+   res.end(JSON.stringify(payload));
+ }
+ 
++// ── WS live restart plugin ────────────────────────────────────────────────────
++const wsLivePath  = path.join(process.cwd(), "scripts", "ws-live.mjs");
++const wsPidDir    = path.join(process.cwd(), "data", "local", "paper-trading-1m-daily");
++const wsPidFile   = path.join(wsPidDir, "ws-live.pid");
++
++const wsState = { running: false, startedAt: "", pid: null, error: "" };
++
++function readSavedPid() {
++  try { return parseInt(readFileSync(wsPidFile, "utf8").trim(), 10); } catch { return null; }
++}
++
++function savePid(pid) {
++  try { mkdirSync(wsPidDir, { recursive: true }); writeFileSync(wsPidFile, String(pid), "utf8"); } catch { /* ignore */ }
++}
++
++function deletePidFile() {
++  try { unlinkSync(wsPidFile); } catch { /* ignore */ }
++}
++
++function killWsLive() {
++  // Kill by saved PID first (covers Vite-restart scenario where in-memory ref is lost)
++  const savedPid = readSavedPid();
++  if (savedPid) {
++    try {
++      if (process.platform === "win32") {
++        execSync(`taskkill /F /T /PID ${savedPid}`, { stdio: "ignore" });
++      } else {
++        execSync(`kill -TERM -$(ps -o pgid= -p ${savedPid} | tr -d ' ') 2>/dev/null || kill ${savedPid} || true`, { stdio: "ignore" });
++      }
++    } catch { /* already dead */ }
++    deletePidFile();
++  }
++  wsState.running = false;
++  wsState.pid = null;
++}
++
++function startWsLive() {
++  killWsLive();
++
++  const child = spawn("node", [wsLivePath], {
++    cwd: process.cwd(),
++    shell: false,
++    stdio: "ignore",
++    detached: false,
++  });
++
++  savePid(child.pid);
++  wsState.running = true;
++  wsState.startedAt = new Date().toISOString();
++  wsState.pid = child.pid;
++  wsState.error = "";
++
++  child.on("error", (err) => { wsState.error = err.message; wsState.running = false; deletePidFile(); });
++  child.on("close", (code) => {
++    wsState.running = false;
++    wsState.error = code !== null && code !== 0 ? `exit code ${code}` : "";
++    deletePidFile();
++  });
++}
++
++// Restore state from PID file on Vite startup
++const restoredPid = readSavedPid();
++if (restoredPid) { wsState.running = true; wsState.pid = restoredPid; }
++
++function wsRestartPlugin() {
++  return {
++    name: "ws-restart-api",
++    configureServer(server) {
++      server.middlewares.use("/api/ws/status", (_req, res) => {
++        sendJson(res, wsState);
++      });
++      server.middlewares.use("/api/ws/restart", (req, res) => {
++        if (req.method !== "POST") { res.statusCode = 405; sendJson(res, { error: "Method not allowed" }); return; }
++        startWsLive();
++        sendJson(res, wsState);
++      });
++    },
++  };
++}
++
+ export default defineConfig({
+-  plugins: [strategyRefreshPlugin(), react()],
++  plugins: [strategyRefreshPlugin(), wsRestartPlugin(), react()],
++  server: { port: 5177, strictPort: true },
+ });

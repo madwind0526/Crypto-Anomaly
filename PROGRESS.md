@@ -180,3 +180,43 @@ detectAnomalyEvents 1m 경로 검증 필요.
 - 기본 화면: `report-anomaly`
 - Daily 운영 가이드 모드 기본값: `"strict"` → `"ignored"`
 - 상단 "General Refresh" 버튼 제거
+
+---
+
+## Update - 2026-05-20
+
+- Ported post-2026-05-19 21:15 operational safeguards from Crypto-General, excluding General-E.
+- Added persisted Guideline/Safety paper-trading case results for strict/ignored x enabled/disabled.
+- Added blocked signal audit data and chart X markers: guide-rule blocks use sky-blue X, safety blocks use red X.
+- Updated paper trading to refresh open-position highestPrice and holdCandles during the loop.
+- Fixed daily selection optimization to use selected market names after market selection is computed.
+- Added fetch timeout and loop overlap guard to anomaly forward simulation.
+- Added npm run sim:anomaly:watchdog to restart the anomaly simulation if paper results stop updating.
+- Replaced blocked-signal chart markers with the custom X primitive from Crypto-General, removing the square marker box.
+- Block precedence is Guideline first, then Safety, so a Guideline-rejected signal stays sky-blue even when Safety O is also displayed.
+- 2026-05-21 operating decision: anomaly daily monitoring should not be forced to exactly 12 coins. Monitor/display the full set selected by anomaly backtracking first, then decide later whether to reduce the count after observing candidate volume.
+
+## 2026-05-21 - WS restored in main Anomaly project
+- Restored the previously branch-only WebSocket live simulation into the main Crypto-Anomaly working tree.
+- Added ws-live scripts/data loader, package dependencies, daily operation WS-O/WS-X summary cards, and WS status/toggle UI.
+- Fixed the WS runner to externalize Node packages instead of bundling ws, avoiding dynamic require failures.
+- Verified build and test pass, then started a single main-project ws:live process writing public/market/ws-live-results.json for all currently selected anomaly markets.
+
+## 2026-05-21 - Anomaly live update recovery
+- Found port 5177 was still serving the old .claude worktree, so the UI showed stale May 19 data while the main project WS was updating separately.
+- Stopped the old worktree server/WS and restarted the main Crypto-Anomaly app on port 5177.
+- Fixed anomaly-watchdog so it does not kill the first simulation cycle just because the previous result file is already stale; it now tracks freshness from child start and file mtime changes.
+- Restarted anomaly watchdog; daily candle/result/dashboard files are updating again, while ws-live-results continues updating independently.
+
+## 2026-05-21 - Branch cleanup
+- Standardized Crypto-Anomaly on main only to avoid confusion between the main working tree and the old claude/eager-varahamihira-1db0b7 worktree branch.
+- Archived the old worktree status/code diff under docs/archive before cleanup.
+- Removed the stale local worktree, deleted the local branch, and deleted the remote branch from origin.
+
+## 2026-05-23 - General-style Anomaly Workflow
+
+- Switched Anomaly workflow from 90-day 5m history to 7-day 1m backtracking for parameter/selection alignment with live 1m and WS data.
+- Added `fetch:anomaly:1m:backtracking` and changed daily selection to top-30 candidates -> top-9 per Anomaly variant.
+- Kept Anomaly A/B/C/D decision logic intact; selection/report uses optimized per-coin params, daily simulation runs the existing strategy logic.
+- Added 00:00 KST refit rule: skip if previous 24h data is insufficient; otherwise blend previous params and previous-24h params with 70/30 weighting.
+- Updated daily operation cards to responsive 3-column layout and refreshed selection/daily/WS files.

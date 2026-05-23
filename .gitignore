@@ -4,4 +4,9 @@ dist/
 .claude/
 data/market/
 public/market/upbit-krw-1m-daily.json
+public/market/anomaly-optimized-params.json
+public/market/anomaly-selection.json
+public/market/dashboard-results.json
+public/market/paper-trading-1m-daily-results.json
+public/market/ws-live-results.json
 *.tsbuildinfo

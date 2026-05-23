@@ -1,0 +1,208 @@
+From 965cc16d31481a9fce8a2dddbd6e1668e09ed43a Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sun, 17 May 2026 21:29:52 +0900
+Subject: [PATCH] =?UTF-8?q?Accumulate=207-day=20rolling=20candle=20history?=
+ =?UTF-8?q?=20=E2=80=94=20no=20midnight=20chart=20reset?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+00:00이 지나도 이전 매매이력과 차트가 유지됩니다.
+
+Changes:
+- Add upbit-krw-1m-anomaly-accum.json: 7-day rolling accumulation
+  (mergeAccumCandles: deduplicate by ts, trim older than ACCUM_DAYS)
+- runCycle: load accum → merge fresh 24h fetch → save → use for sim
+- allTodayMap now spans full ACCUM_DAYS window (no kstTodayStartMs cutoff)
+- ws-live.ts: seed closedCandles from accum file (more context for indicators)
+- ACCUM_DAYS env var to tune window (default 7)
+
+Market selection / parameter adaptation at 00:00 unchanged.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+---
+ scripts/anomaly-variants-sim.ts | 74 ++++++++++++++++++++++++++++-----
+ scripts/ws-live.ts              | 25 ++++++-----
+ 2 files changed, 77 insertions(+), 22 deletions(-)
+
+diff --git a/scripts/anomaly-variants-sim.ts b/scripts/anomaly-variants-sim.ts
+index 8f0c278..2df39fa 100644
+--- a/scripts/anomaly-variants-sim.ts
++++ b/scripts/anomaly-variants-sim.ts
+@@ -52,6 +52,7 @@ import type { TraderOptimizationPlan, MarketScenarioOptimization } from "../src/
+ // ─── paths ────────────────────────────────────────────────────────────────────
+ const root              = process.cwd();   // C:\Claude\Crypto-Anomaly
+ const anomaly1mPath     = path.join(root, "data", "market", "upbit-krw-1m-anomaly.json");
++const accumPath         = path.join(root, "data", "market", "upbit-krw-1m-anomaly-accum.json");
+ const histPath          = path.join(root, "data", "market", "upbit-krw-5m.json");
+ const outputDir         = path.join(root, "public", "market");
+ const paperPath         = path.join(outputDir, "paper-trading-1m-daily-results.json");
+@@ -71,6 +72,9 @@ const LOOKBACK_DAYS      = Number(process.env.LOOKBACK_DAYS    ?? 90);
+ const REMOVAL_DAYS       = Number(process.env.REMOVAL_DAYS     ?? 45);
+ const KST_OFFSET_MS      = 9 * 3_600_000;
+ const MS_DAY             = 86_400_000;
++// Rolling window for simulation & chart — candles older than this are dropped from the accum file.
++// 00:00이 지나도 이전 매매이력이 유지됩니다 (7일 롤링).
++const ACCUM_DAYS         = Number(process.env.ACCUM_DAYS ?? 7);
+ 
+ // Anomaly detection thresholds
+ const ANOMALY_PRICE_THRESH = Number(process.env.ANOMALY_PRICE_THRESH ?? 0.10); // 10%
+@@ -80,6 +84,31 @@ const ANOMALY_VOL_MULT     = Number(process.env.ANOMALY_VOL_MULT     ?? 3.0);  /
+ function kstDateString(): string {
+   return new Date(Date.now() + KST_OFFSET_MS).toISOString().slice(0, 10);
+ }
++
++// ─── Candle accumulation ──────────────────────────────────────────────────────
++/**
++ * Merge freshly-fetched candles into the accumulated rolling window.
++ * Deduplicates by timestamp, sorts ascending, trims to ACCUM_DAYS.
++ */
++function mergeAccumCandles(
++  accum: Record<string, Candle[]>,
++  fresh: Record<string, Candle[]>,
++  keepSince: number,
++): Record<string, Candle[]> {
++  const merged: Record<string, Candle[]> = {};
++  const allMarkets = new Set([...Object.keys(accum), ...Object.keys(fresh)]);
++  for (const market of allMarkets) {
++    const existing = accum[market] ?? [];
++    const incoming = fresh[market] ?? [];
++    const byTs = new Map<number, Candle>();
++    for (const c of existing) byTs.set(c.timestamp, c);
++    for (const c of incoming) byTs.set(c.timestamp, c); // fresh overwrites stale
++    merged[market] = [...byTs.values()]
++      .filter(c => c.timestamp >= keepSince)
++      .sort((a, b) => a.timestamp - b.timestamp);
++  }
++  return merged;
++}
+ function kstTodayStartMs(): number {
+   const kstNow = Date.now() + KST_OFFSET_MS;
+   return kstNow - (kstNow % MS_DAY) - KST_OFFSET_MS;
+@@ -679,8 +708,28 @@ async function runCycle() {
+ 
+   const rawHist = JSON.parse(await readFile(histPath, "utf8"));
+ 
+-  const live1m: Record<string, Candle[]> = rawLive.candlesByMarket ?? {};
+-  const hist5m: Record<string, Candle[]> = rawHist.candlesByMarket ?? {};
++  const freshLive1m: Record<string, Candle[]> = rawLive.candlesByMarket ?? {};
++  const hist5m:      Record<string, Candle[]> = rawHist.candlesByMarket ?? {};
++
++  // ── Accumulate rolling 7-day candle history ───────────────────────────────
++  // Merge freshly-fetched 24h into the accumulated file so trade history
++  // persists across midnight (no daily reset).
++  const accumKeepSince = Date.now() - ACCUM_DAYS * MS_DAY;
++  let previousAccum: Record<string, Candle[]> = {};
++  try {
++    const raw = JSON.parse(await readFile(accumPath, "utf8"));
++    previousAccum = raw.candlesByMarket ?? {};
++  } catch { /* first run — start fresh */ }
++
++  const live1m = mergeAccumCandles(previousAccum, freshLive1m, accumKeepSince);
++
++  // Persist merged data (data/market/ is git-ignored)
++  await mkdir(path.join(root, "data", "market"), { recursive: true });
++  await writeFile(
++    accumPath,
++    JSON.stringify({ generatedAt: new Date().toISOString(), candlesByMarket: live1m }) + "\n",
++    "utf8",
++  );
+ 
+   // Load per-coin optimized params (from last midnight run)
+   try {
+@@ -698,8 +747,8 @@ async function runCycle() {
+   const lastTs  = sampleCandles.at(-1)?.timestamp ?? 0;
+ 
+   console.log(`\n[${new Date().toISOString()}] Anomaly Variants Forward Simulation`);
+-  console.log(`  Live 1m : ${live1mSource}`);
+-  console.log(`            ${Object.keys(live1m).length} markets  ${new Date(firstTs).toISOString().slice(0,16)}–${new Date(lastTs).toISOString().slice(0,16)} UTC`);
++  console.log(`  Fresh 1m: ${live1mSource}`);
++  console.log(`  Accum 1m: ${Object.keys(live1m).length} markets  ${new Date(firstTs).toISOString().slice(0,16)}–${new Date(lastTs).toISOString().slice(0,16)} UTC  (rolling ${ACCUM_DAYS}d)`);
+   console.log(`  Hist 5m : ${Object.keys(hist5m).length} markets  last=${new Date(rawHist.generatedAt ?? 0).toISOString().slice(0,16)}`);
+ 
+   // ── Daily market selection (once per KST day) ─────────────────────────────
+@@ -801,17 +850,19 @@ async function runCycle() {
+   // Build variants with (possibly adapted) parameters
+   const variants = buildVariants(adaptedParams!);
+ 
+-  // Candles for chart: today (00:00 KST) + 3h of yesterday for continuity
+-  const rollingStartMs = kstTodayStartMs() - 3 * 3_600_000;
++  // Candles for sim & chart: rolling ACCUM_DAYS window (no midnight reset).
++  // Trade history accumulates continuously — 00:00이 지나도 이전 이력 유지.
+   const allTodayMap: Record<string, Candle[]> = {};
+-  for (const m of marketNames) allTodayMap[m] = (live1m[m] ?? []).filter(c => c.timestamp >= rollingStartMs);
+-  const todayCandleCount = allTodayMap[marketNames[0]]?.length ?? 0;
++  for (const m of marketNames) allTodayMap[m] = live1m[m] ?? [];
++  const sampleCandleCount = allTodayMap[marketNames[0]]?.length ?? 0;
+   // Total unique timestamps across all markets (Upbit 1m candles have per-market millisecond offsets,
+-  // so the union of 16 markets is much larger than any single market's count).
++  // so the union of N markets is larger than any single market's count).
+   const allTodayTimestamps = new Set<number>();
+   for (const m of marketNames) for (const c of allTodayMap[m] ?? []) allTodayTimestamps.add(c.timestamp);
+   const totalTimestamps = allTodayTimestamps.size;
+-  console.log(`\n  Today's 1m candles since 00:00 KST: ~${todayCandleCount} per market (${totalTimestamps} unique timestamps across all markets)`);
++  const oldestTs = Math.min(...marketNames.map(m => allTodayMap[m]?.[0]?.timestamp ?? Infinity));
++  const oldestStr = isFinite(oldestTs) ? new Date(oldestTs + KST_OFFSET_MS).toISOString().slice(0, 16) + " KST" : "–";
++  console.log(`\n  Accumulated 1m candles: ~${sampleCandleCount} per market  from ${oldestStr}  (${totalTimestamps} unique timestamps)`);
+   console.log(`  Paper sim universe: ${marketNames.length} markets (all 4 variants)\n`);
+ 
+   // ── Build plans + run paper sims ──────────────────────────────────────────
+@@ -930,7 +981,8 @@ async function runCycle() {
+   };
+   await writeFile(dashPath, `${JSON.stringify(dashOutput)}\n`, "utf8");
+ 
+-  // ③ upbit-krw-1m-daily.json — today's 1m candles for Daily 운영 UI
++  // ③ upbit-krw-1m-daily.json — rolling ACCUM_DAYS candles for Daily 운영 UI
++  //    00:00이 지나도 이전 매매이력이 차트에 계속 표시됩니다.
+   const daily1mOutput = {
+     source:             "upbit-public-api",
+     generatedAt:        new Date().toISOString(),
+diff --git a/scripts/ws-live.ts b/scripts/ws-live.ts
+index 2ae561a..61f9995 100644
+--- a/scripts/ws-live.ts
++++ b/scripts/ws-live.ts
+@@ -24,7 +24,9 @@ import type { Candle } from "../src/types/trading";
+ 
+ const root       = process.cwd();
+ const selPath    = path.join(root, "public", "market", "anomaly-selection.json");
+-const live1mPath = path.join(root, "data",   "market", "upbit-krw-1m-anomaly.json");
++// Prefer the accumulated 7-day file (written by sim:anomaly); fall back to fresh 24h fetch.
++const live1mPath = path.join(root, "data",   "market", "upbit-krw-1m-anomaly-accum.json");
++const live1mFallbackPath = path.join(root, "data", "market", "upbit-krw-1m-anomaly.json");
+ const paramsPath = path.join(root, "public", "market", "anomaly-optimized-params.json");
+ const outputDir  = path.join(root, "public", "market");
+ const outputPath = path.join(outputDir, "ws-live-results.json");
+@@ -440,19 +442,20 @@ async function init() {
+     console.log(`[init] Loaded optimized params for ${Object.keys(perCoinParams).length} markets`);
+   } catch { console.log("[init] No optimized params found — using defaults"); }
+ 
+-  // 3. Seed historical candles from live1m data (last N minutes for context)
++  // 3. Seed historical candles — prefer accumulated 7-day file, fall back to fresh 24h fetch.
+   try {
+-    const raw  = JSON.parse(await readFile(live1mPath, "utf8"));
++    let rawText: string;
++    try {
++      rawText = await readFile(live1mPath, "utf8");
++    } catch {
++      rawText = await readFile(live1mFallbackPath, "utf8");
++      console.log("[init] Accumulated file not found — using fresh 24h data");
++    }
++    const raw  = JSON.parse(rawText);
+     const byM: Record<string, Candle[]> = raw.candlesByMarket ?? {};
+-    const kstDayStart = (() => {
+-      const kstNow = Date.now() + 9 * 3_600_000;
+-      return kstNow - (kstNow % 86_400_000) - 9 * 3_600_000;
+-    })();
+     for (const market of selectedMarkets) {
+-      const all = byM[market] ?? [];
+-      // Use today's candles for simulation context (up to 500)
+-      const today = all.filter(c => c.timestamp >= kstDayStart);
+-      closedCandles[market] = today.slice(-500);
++      // Use last 500 candles for indicator context
++      closedCandles[market] = (byM[market] ?? []).slice(-500);
+     }
+     const sample = selectedMarkets[0];
+     console.log(`[init] Seeded ${closedCandles[sample]?.length ?? 0} historical candles per market`);
+-- 
+2.50.0.windows.2
+

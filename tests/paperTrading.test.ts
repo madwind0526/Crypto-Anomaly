@@ -77,6 +77,21 @@ describe("paper trading simulation", () => {
     // Buy at index 5 is blocked by guide rules; no trade should complete
     const buys = result.trades.filter((t) => t.side === "buy");
     expect(buys).toHaveLength(0);
+    expect(result.blockedSignals.some((signal) => signal.reason === "guide-rule")).toBe(true);
+  });
+
+  it("records safety blocked buy signals when auto block is enabled", () => {
+    const candles = createCandles("KRW-TEST", 260);
+    const plan = createPlan();
+    plan.selectedMarkets[0].bestResult.returnRate = -0.01;
+    const result = runPaperTradingSimulation(strategy, plan, { "KRW-TEST": candles }, {
+      autoBlockMode: "enabled",
+      guideRuleMode: "ignored",
+    });
+
+    expect(result.trades.filter((trade) => trade.side === "buy")).toHaveLength(0);
+    expect(result.safetyBlockedByMarket["KRW-TEST"]).toBeGreaterThan(0);
+    expect(result.blockedSignals.some((signal) => signal.reason === "safety")).toBe(true);
   });
 });
 

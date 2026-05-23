@@ -11,6 +11,7 @@ import {
   type DailyPaperResult,
   type DailyPaperResultsPayload,
 } from "../data/marketData";
+import { loadWsLiveResults, type WsLiveResults } from "../data/wsLiveData";
 import { defaultBacktestConfig } from "../simulation/backtest";
 import { decideDailyOperation, scoreSignal, type DailySignal } from "../simulation/dailyOperation";
 import {
@@ -22,11 +23,11 @@ import {
 import { buildTraderOptimizationPlans, type TraderOptimizationPlan } from "../simulation/traderOptimization";
 import { strategies } from "../strategies";
 import { traderProfiles } from "../traders/profiles";
-import type { BacktestResult, Candle, GuideRuleMode, Trade, TraderId } from "../types/trading";
+import type { BacktestResult, BlockedSignal, Candle, GuideRuleMode, SafetyMode, Trade, TraderId } from "../types/trading";
 import { MarketChart } from "../ui/MarketChart";
 
 type ThemeMode = "light" | "dark";
-type AutoBlockMode = "enabled" | "disabled";
+type AutoBlockMode = SafetyMode;
 type ScreenId =
   | "scenario-anomaly"
   | "scenario-guideline"
@@ -53,7 +54,7 @@ const screenIds: ScreenId[] = [
 ];
 
 type PopupState =
-  | { currentReturn: number; dayStartMs: number | undefined; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
+  | { blockedSignals: BlockedSignal[]; currentReturn: number; dayStartMs: number | undefined; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
   | {
       autoBlockMode: AutoBlockMode;
       guideMode: GuideRuleMode;
@@ -85,6 +86,7 @@ interface DisplayTrade extends Trade {
 
 interface DailyEntry {
   autoBlock: AutoBlockEvaluation;
+  blockedSignals: BlockedSignal[];
   blockedBuyCount: number;
   candles: Candle[];      // all candles including pre-midnight (for chart)
   dayStartMs: number;     // KST midnight timestamp (for midnight line)
@@ -239,6 +241,7 @@ export function App() {
   const [dailyPaperResults, setDailyPaperResults] = useState<DailyPaperResultsPayload | null>(null);
   const [dashboardResults, setDashboardResults] = useState<DashboardResults | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<StrategyRefreshStatus | null>(null);
+  const [wsLiveResults, setWsLiveResults] = useState<WsLiveResults | null>(null);
   const [importNotice, setImportNotice] = useState("아직 import된 전략 파일이 없습니다.");
   const lastRefreshCompletedAtRef = useRef("");
   const lastDailyMarketGeneratedAtRef = useRef("");
@@ -327,6 +330,21 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    async function pollWsLiveResults() {
+      const result = await loadWsLiveResults();
+      if (active) setWsLiveResults(result);
+    }
+
+    pollWsLiveResults();
+    const timer = window.setInterval(pollWsLiveResults, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
   const comparisonsByMode = useMemo(
     () => ({
       strict:
@@ -347,7 +365,7 @@ export function App() {
         dashboardResults?.optimizationPlans ??
         buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
           candidateMarketCount: 30,
-          monitoringMarketCount: 12,
+          monitoringMarketCount: 9,
           guideRuleMode: "strict",
           config: { ...defaultBacktestConfig, guideRuleMode: "strict" },
         }),
@@ -356,7 +374,7 @@ export function App() {
         dashboardResults?.optimizationPlans ??
         buildTraderOptimizationPlans(strategies, marketData.candlesByMarket, {
           candidateMarketCount: 30,
-          monitoringMarketCount: 12,
+          monitoringMarketCount: 9,
           guideRuleMode: "ignored",
           config: { ...defaultBacktestConfig, guideRuleMode: "ignored" },
         }),
@@ -378,7 +396,7 @@ export function App() {
   const activeOptimizationPlans = optimizationPlansByMode[activeDailyGuideMode];
   const ranked = activeComparisons.slice().sort((a, b) => b.bestResult.returnRate - a.bestResult.returnRate);
   const operationMarketData = dailyMarketData ?? marketData;
-  const activeDailyPaperResults = dailyPaperResults?.results?.[activeDailyGuideMode] ?? {};
+  const activeDailyPaperResults = getDailyPaperCaseResults(dailyPaperResults, activeDailyGuideMode, activeDailyAutoBlockMode);
   const selectedMarketCandles = popup?.kind === "market"
     ? operationMarketData.candlesByMarket[popup.market] ?? marketData.candlesByMarket[popup.market] ?? []
     : [];
@@ -409,8 +427,8 @@ export function App() {
     }));
   }
 
-  function openMarketPopup(market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) {
-    setPopup({ currentReturn, dayStartMs, kind: "market", market, tradeSummary, trades });
+  function openMarketPopup(market: string, trades: Trade[], blockedSignals: BlockedSignal[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) {
+    setPopup({ blockedSignals, currentReturn, dayStartMs, kind: "market", market, tradeSummary, trades });
     setModalInterval(chartInterval);
   }
 
@@ -557,12 +575,15 @@ export function App() {
             paperResult={activeDailyPaperResults[activeDailyScreen.traderId]}
             screen={activeDailyScreen}
             themeMode={themeMode}
+            wsLiveResults={wsLiveResults}
+            wsTraderId={activeDailyScreen.traderId}
           />
         ) : null}
       </section>
 
       {popup?.kind === "market" ? (
         <MarketInfoPopup
+          blockedSignals={popup.blockedSignals}
           candles={selectedMarketCandles}
           currentReturn={popup.currentReturn}
           dayStartMs={popup.dayStartMs}
@@ -603,6 +624,14 @@ async function loadDashboardState(): Promise<
 
 async function loadDailyOperationState(): Promise<[DashboardMarketData | null, DailyPaperResultsPayload | null]> {
   return Promise.all([loadDailyOperationMarketData(), loadDailyPaperResults()]);
+}
+
+function getDailyPaperCaseResults(
+  payload: DailyPaperResultsPayload | null,
+  guideMode: GuideRuleMode,
+  autoBlockMode: AutoBlockMode,
+) {
+  return payload?.caseResults?.[guideMode]?.[autoBlockMode] ?? payload?.results?.[guideMode] ?? {};
 }
 
 async function loadRefreshStatus(): Promise<StrategyRefreshStatus | null> {
@@ -892,6 +921,8 @@ function DailyOperationView({
   paperResult,
   screen,
   themeMode,
+  wsLiveResults,
+  wsTraderId,
 }: {
   autoBlockMode: AutoBlockMode;
   chartInterval: ChartInterval;
@@ -900,12 +931,14 @@ function DailyOperationView({
   onAutoBlockModeChange: (mode: AutoBlockMode) => void;
   onChartIntervalChange: (interval: ChartInterval) => void;
   onGuideModeChange: (mode: GuideRuleMode) => void;
-  onOpenMarket: (market: string, trades: Trade[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) => void;
+  onOpenMarket: (market: string, trades: Trade[], blockedSignals: BlockedSignal[], currentReturn: number, tradeSummary: TradeSummary, dayStartMs: number | undefined) => void;
   onOpenOperation: (tab: OperationPopupTab) => void;
   plan: TraderOptimizationPlan | undefined;
   paperResult: DailyPaperResult | undefined;
   screen: { title: string; traderId: TraderId; description: string };
   themeMode: ThemeMode;
+  wsLiveResults: WsLiveResults | null;
+  wsTraderId: TraderId;
 }) {
   const profile = traderProfiles.find((item) => item.id === screen.traderId);
   const entries = useMemo(
@@ -927,6 +960,16 @@ function DailyOperationView({
     [signals],
   );
 
+  const [wsViewMode, setWsViewMode] = useState<"ws-o" | "ws-x">("ws-x");
+  const wsO = wsLiveResults?.wsO?.[wsTraderId];
+  const wsX = wsLiveResults?.wsX?.[wsTraderId];
+  const wsConnected = wsLiveResults?.status === "connected";
+  const wsDotColor = wsConnected ? "#4ade80" : wsLiveResults ? "#f87171" : "#94a3b8";
+  const wsStatusLabel = wsLiveResults ? (wsConnected ? `WS ${wsLiveResults.tickCount.toLocaleString()}t` : "WS offline") : "WS -";
+  function formatWsResult(result?: { returnRate: number; trades: number } | null) {
+    if (!result) return "-";
+    return `${formatPct(result.returnRate)} (${result.trades}t)`;
+  }
   return (
     <>
       <section className="panel daily-control-panel">
@@ -938,6 +981,11 @@ function DailyOperationView({
           <div className="operation-toggles">
             <GuideRuleToggle mode={guideMode} onChange={onGuideModeChange} />
             <AutoBlockToggle mode={autoBlockMode} onChange={onAutoBlockModeChange} />
+            <div className="toggle-group ws-toggle-group">
+              <span className="ws-status-dot" style={{ color: wsDotColor }} title={wsStatusLabel}>{wsStatusLabel}</span>
+              <button className={wsViewMode === "ws-o" ? "active" : ""} onClick={() => setWsViewMode("ws-o")} type="button">WS O</button>
+              <button className={wsViewMode === "ws-x" ? "active" : ""} onClick={() => setWsViewMode("ws-x")} type="button">WS X</button>
+            </div>
           </div>
         </div>
         <div className="daily-summary">
@@ -945,13 +993,15 @@ function DailyOperationView({
           <InfoTile title="Best 거래 요약" value={operationSummary.bestTradeSummary} />
           <InfoTile title="Best 코인 수익률" value={formatPct(operationSummary.bestReturn)} />
           <InfoTile title="전체 수익률" value={formatPct(operationSummary.totalReturn)} />
+          <InfoTile title="WS-O 수익률" value={formatWsResult(wsO)} />
+          <InfoTile title="WS-X 수익률" value={formatWsResult(wsX)} />
         </div>
       </section>
 
       <section className="panel watch-panel">
         <div className="section-head">
           <div className="inline-title">
-            <h3>12개 Daily Operation 화면</h3>
+            <h3>Daily Operation 화면</h3>
             <IntervalControls interval={chartInterval} onChange={onChartIntervalChange} label="Chart period" compact />
           </div>
           <div className="operation-panel-actions">
@@ -961,16 +1011,16 @@ function DailyOperationView({
           </div>
         </div>
         <div className="watch-grid" aria-label="Daily operation markets">
-          {entries.map(({ candles, currentReturn, dayStartMs, label, market, tradeSummary, trades }) => {
+          {entries.map(({ blockedSignals, candles, currentReturn, dayStartMs, label, market, tradeSummary, trades }) => {
             const aggregated = aggregateCandles(candles, chartInterval);
 
             return (
               <article
                 className="symbol-card"
                 key={market}
-                onClick={() => onOpenMarket(market, trades, currentReturn, tradeSummary, dayStartMs)}
+                onClick={() => onOpenMarket(market, trades, blockedSignals, currentReturn, tradeSummary, dayStartMs)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") onOpenMarket(market, trades, currentReturn, tradeSummary, dayStartMs);
+                  if (event.key === "Enter" || event.key === " ") onOpenMarket(market, trades, blockedSignals, currentReturn, tradeSummary, dayStartMs);
                 }}
                 role="button"
                 tabIndex={0}
@@ -985,11 +1035,11 @@ function DailyOperationView({
                   <span>{label}</span>
                   <strong style={{ color: tradeSummary.returnRate > 0 ? "#7dd3fc" : tradeSummary.returnRate < 0 ? "#ef8181" : "#ffffff" }}>{formatTradeSummary(tradeSummary)}</strong>
                 </div>
-                <MarketChart candles={aggregated} dayStartMs={dayStartMs} interval={chartInterval} themeMode={themeMode} trades={trades} variant="mini" />
+                <MarketChart blockedSignals={blockedSignals} candles={aggregated} boundaryTimestamp={dayStartMs} interval={chartInterval} themeMode={themeMode} trades={trades} variant="mini" />
               </article>
             );
           })}
-          {entries.length === 0 ? <div className="empty-state">선택된 12개 감시 종목이 아직 없습니다.</div> : null}
+          {entries.length === 0 ? <div className="empty-state">선택된 감시 종목이 아직 없습니다.</div> : null}
         </div>
       </section>
 
@@ -998,6 +1048,7 @@ function DailyOperationView({
 }
 
 function MarketInfoPopup({
+  blockedSignals,
   candles,
   currentReturn,
   dayStartMs,
@@ -1009,6 +1060,7 @@ function MarketInfoPopup({
   tradeSummary,
   trades,
 }: {
+  blockedSignals: BlockedSignal[];
   candles: Candle[];
   currentReturn: number;
   dayStartMs: number | undefined;
@@ -1038,8 +1090,9 @@ function MarketInfoPopup({
           </div>
         </div>
         <MarketChart
+          blockedSignals={blockedSignals}
           candles={aggregated}
-          dayStartMs={dayStartMs}
+          boundaryTimestamp={dayStartMs}
           interval={interval}
           metrics={{
             detail: formatTradeSummary(tradeSummary),
@@ -1261,7 +1314,7 @@ function OptimizationSummary({ optimizationPlans }: { optimizationPlans: TraderO
       <div className="section-head">
         <div>
           <h3>Monitoring Selection Summary</h3>
-          <p>각 전략은 후보 30개를 평가한 뒤 감시 대상 12개를 선택합니다.</p>
+          <p>각 전략은 후보 30개를 평가한 뒤 Anomaly 조건에 맞는 감시 대상을 선택합니다.</p>
         </div>
         <strong>Top 30 -&gt; 12</strong>
       </div>
@@ -1908,9 +1961,15 @@ function buildDailyEntries(
         const signal = applyAutoBlock(buildSignalFromResult(item.result), autoBlockMode, autoBlock);
         const rawTrades = (paperResult?.trades ?? item.result.trades ?? []).filter((trade) => trade.market === item.market);
         const dailyRawTrades = filterTradesSince(rawTrades, dayStart);
-        const trades = filterMarketTradesBySafety(dailyRawTrades, item.result, item.candles, autoBlockMode);
+        const blockedSignals = filterBlockedSignalsSince(
+          paperResult?.blockedSignals?.filter((signal) => signal.market === item.market) ?? [],
+          dayStart,
+        );
+        const trades = paperResult?.autoBlockMode ? dailyRawTrades : filterMarketTradesBySafety(dailyRawTrades, item.result, item.candles, autoBlockMode);
         const paperReturn = getMarketPaperReturn(trades, dailyCandles);
-        const blockedBuyCount = autoBlockMode === "enabled" ? countBlockedBuysBySafety(dailyRawTrades, item.result, item.candles) : 0;
+        const blockedBuyCount = paperResult?.blockedSignals
+          ? blockedSignals.filter((signal) => signal.reason === "safety").length
+          : autoBlockMode === "enabled" ? countBlockedBuysBySafety(dailyRawTrades, item.result, item.candles) : 0;
         const tradeSummary = buildTradeSummary(trades, blockedBuyCount, paperReturn);
 
         return {
@@ -1918,6 +1977,7 @@ function buildDailyEntries(
           candles: item.candles, // all candles (pre-midnight + today) for chart continuity
           dayStartMs: dayStart,
           autoBlock,
+          blockedSignals,
           blockedBuyCount,
           currentReturn,
           paperReturn,
@@ -2066,6 +2126,10 @@ function filterCandlesSince(candles: Candle[], since: number) {
 
 function filterTradesSince<T extends Trade>(trades: T[], since: number) {
   return trades.filter((trade) => trade.timestamp >= since);
+}
+
+function filterBlockedSignalsSince<T extends BlockedSignal>(signals: T[], since: number) {
+  return signals.filter((signal) => signal.timestamp >= since);
 }
 
 function getDailyReturnAtTimestamp(candles: Candle[], timestamp: number) {

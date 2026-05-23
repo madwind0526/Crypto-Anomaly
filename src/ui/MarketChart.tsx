@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import {
   CandlestickSeries,
   createChart,
@@ -6,25 +6,25 @@ import {
   CrosshairMode,
   HistogramSeries,
   type IChartApi,
+  type IPrimitivePaneRenderer,
+  type IPrimitivePaneView,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type ISeriesPrimitive,
-  type IPrimitivePaneRenderer,
-  type IPrimitivePaneView,
   type SeriesAttachedParameter,
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import type { CanvasRenderingTarget2D } from "fancy-canvas";
-import type { Candle, Trade } from "../types/trading";
+import type { BlockedSignal, Candle, Trade } from "../types/trading";
 import { normalizeChartInterval, type ChartInterval } from "../data/candleAggregation";
 
 interface MarketChartProps {
+  boundaryTimestamp?: number;
+  blockedSignals?: BlockedSignal[];
   candles: Candle[];
-  dayStartMs?: number; // KST midnight timestamp — dims pre-midnight candles and draws a boundary marker
   interval: ChartInterval;
   metrics?: {
-    detail?: string;
+    detail?: ReactNode;
     detailClassName?: string;
     returnRate: number;
     returnTitle?: string;
@@ -39,14 +39,24 @@ interface MeasurementPoints {
   p2: Candle | null;
 }
 
-export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode, trades = [], variant = "mini" }: MarketChartProps) {
+export function MarketChart({
+  boundaryTimestamp,
+  blockedSignals = [],
+  candles,
+  interval,
+  metrics,
+  themeMode,
+  trades = [],
+  variant = "mini",
+}: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markerSeriesRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const dayLinePrimitiveRef = useRef<DayStartLinePrimitive | null>(null);
+  const boundaryPrimitiveRef = useRef<DailyBoundaryPrimitive | null>(null);
+  const blockedSignalPrimitiveRef = useRef<BlockedSignalPrimitive | null>(null);
   const candlesByTimeRef = useRef<Map<Time, Candle>>(new Map());
   const [measurementPoints, setMeasurementPoints] = useState<MeasurementPoints>({ p1: null, p2: null });
   const normalizedInterval = useMemo(() => normalizeChartInterval(interval), [interval]);
@@ -83,12 +93,13 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
     if (!container) return;
 
     const colors = getChartColors(themeMode);
+    const responsiveOptions = getResponsiveChartOptions(container.clientWidth, variant);
     const chart = createChart(container, {
       autoSize: true,
       layout: {
         background: { color: "transparent" },
         textColor: colors.text,
-        fontSize: variant === "mini" ? 10 : 12,
+        fontSize: responsiveOptions.fontSize,
       },
       localization: {
         timeFormatter: formatChartTimeLabel,
@@ -100,7 +111,7 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
       rightPriceScale: {
         borderVisible: false,
         entireTextOnly: true,
-        minimumWidth: variant === "large" ? 92 : 64,
+        minimumWidth: responsiveOptions.priceScaleWidth,
         scaleMargins: {
           top: 0.08,
           bottom: 0.32,
@@ -108,6 +119,7 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
       },
       timeScale: {
         borderVisible: false,
+        visible: true,
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: formatChartTimeLabel,
@@ -161,6 +173,12 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     markerSeriesRef.current = createSeriesMarkers(candleSeries, [], { zOrder: "top" });
+    const boundaryPrimitive = new DailyBoundaryPrimitive(themeMode, variant);
+    candleSeries.attachPrimitive(boundaryPrimitive);
+    boundaryPrimitiveRef.current = boundaryPrimitive;
+    const blockedSignalPrimitive = new BlockedSignalPrimitive(themeMode, variant);
+    candleSeries.attachPrimitive(blockedSignalPrimitive);
+    blockedSignalPrimitiveRef.current = blockedSignalPrimitive;
 
     chart.subscribeCrosshairMove((param) => {
       const tooltip = tooltipRef.current;
@@ -209,15 +227,37 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
     });
 
     return () => {
-      dayLinePrimitiveRef.current = null; // chart destruction removes all primitives
+      candleSeries.detachPrimitive(boundaryPrimitive);
+      candleSeries.detachPrimitive(blockedSignalPrimitive);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       markerSeriesRef.current = null;
+      boundaryPrimitiveRef.current = null;
+      blockedSignalPrimitiveRef.current = null;
     };
   }, [themeMode, variant]);
 
+  useEffect(() => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+
+    const applyResponsiveOptions = () => {
+      const { fontSize, priceScaleWidth } = getResponsiveChartOptions(container.clientWidth, variant);
+      chart.applyOptions({
+        layout: { fontSize },
+        rightPriceScale: { minimumWidth: priceScaleWidth },
+      });
+    };
+
+    applyResponsiveOptions();
+    const observer = new ResizeObserver(applyResponsiveOptions);
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [variant]);
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
     const volumeSeries = volumeSeriesRef.current;
@@ -226,48 +266,27 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
 
     const colors = getChartColors(themeMode);
     candleSeries.setData(
-      visibleCandles.map((candle) => {
-        const isPre = dayStartMs !== undefined && candle.timestamp < dayStartMs;
-        return {
-          time: toChartTime(candle.timestamp),
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-          ...(isPre ? {
-            color:       colors.preDay,
-            wickColor:   colors.preDay,
-            borderColor: colors.preDay,
-          } : {}),
-        };
-      }),
+      visibleCandles.map((candle) => ({
+        time: toChartTime(candle.timestamp),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      })),
     );
 
     volumeSeries.setData(
-      visibleCandles.map((candle) => {
-        const isPre = dayStartMs !== undefined && candle.timestamp < dayStartMs;
-        return {
-          time: toChartTime(candle.timestamp),
-          value: candle.quoteVolume,
-          color: isPre ? colors.preDayVolume : (candle.close >= candle.open ? colors.volumeUp : colors.volumeDown),
-        };
-      }),
+      visibleCandles.map((candle) => ({
+        time: toChartTime(candle.timestamp),
+        value: candle.quoteVolume,
+        color: candle.close >= candle.open ? colors.volumeUp : colors.volumeDown,
+      })),
     );
 
     chart.timeScale().fitContent();
-
-    // Attach / re-attach the vertical day-start line primitive
-    if (dayLinePrimitiveRef.current) {
-      candleSeries.detachPrimitive(dayLinePrimitiveRef.current);
-      dayLinePrimitiveRef.current = null;
-    }
-    if (dayStartMs !== undefined) {
-      const lineColor = themeMode === "dark" ? "rgba(124, 106, 247, 0.8)" : "rgba(100, 85, 220, 0.8)";
-      const primitive = new DayStartLinePrimitive(toChartTime(dayStartMs), lineColor);
-      candleSeries.attachPrimitive(primitive);
-      dayLinePrimitiveRef.current = primitive;
-    }
-  }, [themeMode, visibleCandles, dayStartMs]);
+    boundaryPrimitiveRef.current?.update(getBoundaryChartTime(boundaryTimestamp, visibleCandles), themeMode, variant);
+    blockedSignalPrimitiveRef.current?.update(blockedSignals, visibleCandles, themeMode, variant);
+  }, [blockedSignals, boundaryTimestamp, themeMode, variant, visibleCandles]);
 
   useEffect(() => {
     const markerSeries = markerSeriesRef.current;
@@ -277,9 +296,8 @@ export function MarketChart({ candles, dayStartMs, interval, metrics, themeMode,
     markerSeries.setMarkers([
       ...createTradeMarkers(trades, visibleCandles, themeMode, variant),
       ...(variant === "large" ? createMeasurementMarkers(measurementPoints, visibleTimes, themeMode) : []),
-      ...createDayStartMarker(dayStartMs, visibleCandles),
     ]);
-  }, [dayStartMs, measurementPoints, themeMode, trades, variant, visibleCandles]);
+  }, [measurementPoints, themeMode, trades, variant, visibleCandles]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>) {
     if (candles.length <= visibleCandles.length) return;
@@ -450,6 +468,252 @@ function findVisibleCandleForTrade(visibleCandles: Candle[], timestamp: number) 
   return selected;
 }
 
+function getBoundaryChartTime(boundaryTimestamp: number | undefined, visibleCandles: Candle[]) {
+  if (!boundaryTimestamp || visibleCandles.length === 0) return null;
+
+  const first = visibleCandles[0];
+  const last = visibleCandles[visibleCandles.length - 1];
+  if (boundaryTimestamp < first.timestamp || boundaryTimestamp > last.timestamp) return null;
+
+  return toChartTime(findNearestCandleTimestamp(visibleCandles, boundaryTimestamp));
+}
+
+function findNearestCandleTimestamp(candles: Candle[], timestamp: number) {
+  let nearest = candles[0].timestamp;
+  let nearestDistance = Math.abs(nearest - timestamp);
+
+  for (const candle of candles) {
+    const distance = Math.abs(candle.timestamp - timestamp);
+    if (distance < nearestDistance) {
+      nearest = candle.timestamp;
+      nearestDistance = distance;
+    }
+    if (candle.timestamp >= timestamp && distance > nearestDistance) break;
+  }
+
+  return nearest;
+}
+
+interface BlockedSignalDrawingPoint {
+  color: string;
+  x: number;
+  y: number;
+}
+
+class BlockedSignalPrimitive implements ISeriesPrimitive<Time> {
+  private chart: IChartApi | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
+  private readonly view = new BlockedSignalView();
+
+  constructor(themeMode: "light" | "dark", variant: "mini" | "large") {
+    this.view.update([], [], themeMode, variant);
+  }
+
+  attached(param: SeriesAttachedParameter<Time, "Candlestick">) {
+    this.chart = param.chart as IChartApi;
+    this.series = param.series as ISeriesApi<"Candlestick">;
+    this.requestUpdate = param.requestUpdate;
+    this.view.setChart(this.chart, this.series);
+  }
+
+  detached() {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+    this.view.setChart(null, null);
+  }
+
+  paneViews() {
+    return [this.view];
+  }
+
+  update(
+    signals: BlockedSignal[],
+    visibleCandles: Candle[],
+    themeMode: "light" | "dark",
+    variant: "mini" | "large",
+  ) {
+    this.view.update(signals, visibleCandles, themeMode, variant);
+    this.requestUpdate?.();
+  }
+}
+
+class BlockedSignalView implements IPrimitivePaneView {
+  private chart: IChartApi | null = null;
+  private series: ISeriesApi<"Candlestick"> | null = null;
+  private signals: BlockedSignal[] = [];
+  private visibleCandles: Candle[] = [];
+  private themeMode: "light" | "dark" = "dark";
+  private variant: "mini" | "large" = "mini";
+
+  setChart(chart: IChartApi | null, series: ISeriesApi<"Candlestick"> | null) {
+    this.chart = chart;
+    this.series = series;
+  }
+
+  update(
+    signals: BlockedSignal[],
+    visibleCandles: Candle[],
+    themeMode: "light" | "dark",
+    variant: "mini" | "large",
+  ) {
+    this.signals = signals.slice().sort((a, b) => a.timestamp - b.timestamp);
+    this.visibleCandles = visibleCandles;
+    this.themeMode = themeMode;
+    this.variant = variant;
+  }
+
+  zOrder() {
+    return "top" as const;
+  }
+
+  renderer() {
+    if (!this.chart || !this.series || this.signals.length === 0 || this.visibleCandles.length === 0) return null;
+
+    const points: BlockedSignalDrawingPoint[] = [];
+    const size = this.variant === "large" ? 6.5 : 4.5;
+    for (const signal of this.signals) {
+      const candle = findVisibleCandleForTrade(this.visibleCandles, signal.timestamp);
+      if (!candle) continue;
+      const x = this.chart.timeScale().timeToCoordinate(toChartTime(candle.timestamp));
+      const y = this.series.priceToCoordinate(candle.high);
+      if (x === null || y === null) continue;
+      points.push({
+        color: getBlockedSignalColor(signal, this.themeMode),
+        x,
+        y: Math.max(size + 3, y - size * 1.45),
+      });
+    }
+
+    return points.length > 0 ? new BlockedSignalRenderer(points, size, this.variant) : null;
+  }
+}
+
+class BlockedSignalRenderer implements IPrimitivePaneRenderer {
+  constructor(
+    private readonly points: BlockedSignalDrawingPoint[],
+    private readonly size: number,
+    private readonly variant: "mini" | "large",
+  ) {}
+
+  draw(target: Parameters<IPrimitivePaneRenderer["draw"]>[0]) {
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      context.save();
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.lineWidth = this.variant === "large" ? 2 : 1.5;
+
+      for (const point of this.points) {
+        if (point.x < -this.size || point.x > mediaSize.width + this.size) continue;
+        if (point.y < -this.size || point.y > mediaSize.height + this.size) continue;
+
+        context.strokeStyle = point.color;
+        context.shadowColor = point.color;
+        context.shadowBlur = this.variant === "large" ? 4 : 2.5;
+        context.beginPath();
+        context.moveTo(point.x - this.size, point.y - this.size);
+        context.lineTo(point.x + this.size, point.y + this.size);
+        context.moveTo(point.x + this.size, point.y - this.size);
+        context.lineTo(point.x - this.size, point.y + this.size);
+        context.stroke();
+      }
+
+      context.restore();
+    });
+  }
+}
+
+function getBlockedSignalColor(signal: BlockedSignal, themeMode: "light" | "dark") {
+  if (signal.reason === "safety") return themeMode === "dark" ? "#ff4f7b" : "#c51f4a";
+  return themeMode === "dark" ? "#63d7ff" : "#007db0";
+}
+
+class DailyBoundaryPrimitive implements ISeriesPrimitive<Time> {
+  private chart: IChartApi | null = null;
+  private requestUpdate: (() => void) | null = null;
+  private readonly view = new DailyBoundaryView();
+
+  constructor(themeMode: "light" | "dark", variant: "mini" | "large") {
+    this.view.update(null, themeMode, variant);
+  }
+
+  attached(param: SeriesAttachedParameter<Time>) {
+    this.chart = param.chart as IChartApi;
+    this.requestUpdate = param.requestUpdate;
+    this.view.setChart(this.chart);
+  }
+
+  detached() {
+    this.chart = null;
+    this.requestUpdate = null;
+    this.view.setChart(null);
+  }
+
+  paneViews() {
+    return [this.view];
+  }
+
+  update(time: Time | null, themeMode: "light" | "dark", variant: "mini" | "large") {
+    this.view.update(time, themeMode, variant);
+    this.requestUpdate?.();
+  }
+}
+
+class DailyBoundaryView implements IPrimitivePaneView {
+  private chart: IChartApi | null = null;
+  private color = "#f2b15e";
+  private time: Time | null = null;
+  private variant: "mini" | "large" = "mini";
+
+  setChart(chart: IChartApi | null) {
+    this.chart = chart;
+  }
+
+  update(time: Time | null, themeMode: "light" | "dark", variant: "mini" | "large") {
+    this.time = time;
+    this.variant = variant;
+    this.color = themeMode === "dark" ? "#f2b15e" : "#c77713";
+  }
+
+  zOrder() {
+    return "top" as const;
+  }
+
+  renderer() {
+    if (!this.chart || this.time === null) return null;
+    const x = this.chart.timeScale().timeToCoordinate(this.time);
+    if (x === null) return null;
+    return new DailyBoundaryRenderer(x, this.color, this.variant);
+  }
+}
+
+class DailyBoundaryRenderer implements IPrimitivePaneRenderer {
+  constructor(
+    private readonly x: number,
+    private readonly color: string,
+    private readonly variant: "mini" | "large",
+  ) {}
+
+  draw(target: Parameters<IPrimitivePaneRenderer["draw"]>[0]) {
+    target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+      if (this.x < 0 || this.x > mediaSize.width) return;
+
+      context.save();
+      context.strokeStyle = this.color;
+      context.lineWidth = this.variant === "large" ? 3 : 2;
+      context.setLineDash(this.variant === "large" ? [8, 5] : [6, 4]);
+      context.shadowColor = this.color;
+      context.shadowBlur = this.variant === "large" ? 8 : 5;
+      context.beginPath();
+      context.moveTo(this.x, 0);
+      context.lineTo(this.x, mediaSize.height);
+      context.stroke();
+      context.restore();
+    });
+  }
+}
+
 function getVisibleDurationMs(interval: ChartInterval) {
   const hour = 60 * 60 * 1000;
   const day = 24 * hour;
@@ -471,22 +735,11 @@ function fromChartTime(time: Time) {
 }
 
 function formatChartTimeLabel(time: Time) {
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Seoul",
-  }).format(new Date(fromChartTime(time)));
+  return formatHourMinute(fromChartTime(time));
 }
 
 function formatTooltipTime(timestamp: number) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Asia/Seoul",
-  }).format(new Date(timestamp));
+  return formatMonthDayTime(timestamp);
 }
 
 function formatRangeLabel(candles: Candle[]) {
@@ -497,13 +750,31 @@ function formatRangeLabel(candles: Candle[]) {
 }
 
 function formatShortDate(timestamp: number) {
-  return new Intl.DateTimeFormat("ko-KR", {
+  return formatMonthDayTime(timestamp);
+}
+
+function formatHourMinute(timestamp: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Seoul",
+  }).formatToParts(new Date(timestamp));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("hour")}:${get("minute")}`;
+}
+
+function formatMonthDayTime(timestamp: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
     timeZone: "Asia/Seoul",
-  }).format(new Date(timestamp));
+  }).formatToParts(new Date(timestamp));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
 function formatNumber(value: number) {
@@ -559,77 +830,24 @@ function formatElapsedTime(milliseconds: number) {
   return `${minutes}m`;
 }
 
-// ── Vertical day-start line primitive ───────────────────────────────────────
-
-class DayStartLineRenderer implements IPrimitivePaneRenderer {
-  constructor(private _x: number | null, private _color: string) {}
-
-  draw(target: CanvasRenderingTarget2D): void {
-    if (this._x === null) return;
-    target.useBitmapCoordinateSpace(({ context: ctx, horizontalPixelRatio, verticalPixelRatio, mediaSize }) => {
-      const bx = Math.round(this._x! * horizontalPixelRatio);
-      const bh = Math.round(mediaSize.height * verticalPixelRatio);
-      const dash = Math.round(4 * verticalPixelRatio);
-      ctx.save();
-      ctx.strokeStyle = this._color;
-      ctx.lineWidth = Math.round(horizontalPixelRatio);
-      ctx.setLineDash([dash, dash]);
-      ctx.globalAlpha = 0.75;
-      ctx.beginPath();
-      ctx.moveTo(bx, 0);
-      ctx.lineTo(bx, bh);
-      ctx.stroke();
-      ctx.restore();
-    });
-  }
-}
-
-class DayStartLinePaneView implements IPrimitivePaneView {
-  private _x: number | null = null;
-  constructor(private _color: string) {}
-  update(x: number | null): void { this._x = x; }
-  renderer(): IPrimitivePaneRenderer { return new DayStartLineRenderer(this._x, this._color); }
-  zOrder() { return "normal" as const; }
-}
-
-class DayStartLinePrimitive implements ISeriesPrimitive<Time> {
-  private _chart: IChartApi | null = null;
-  private _paneView: DayStartLinePaneView;
-
-  constructor(private _time: Time, color: string) {
-    this._paneView = new DayStartLinePaneView(color);
+function getResponsiveChartOptions(width: number, variant: "mini" | "large") {
+  if (variant === "large") {
+    return {
+      fontSize: clampNumber(Math.round(width / 92), 11, 14),
+      priceScaleWidth: clampNumber(Math.round(width / 15), 84, 112),
+    };
   }
 
-  attached({ chart }: SeriesAttachedParameter<Time>): void { this._chart = chart; }
-  detached(): void { this._chart = null; }
-
-  updateAllViews(): void {
-    if (!this._chart) return;
-    this._paneView.update(this._chart.timeScale().timeToCoordinate(this._time));
-  }
-
-  paneViews(): readonly IPrimitivePaneView[] { return [this._paneView]; }
+  return {
+    fontSize: clampNumber(Math.round(width / 38), 8, 12),
+    priceScaleWidth: clampNumber(Math.round(width / 7), 48, 70),
+  };
 }
 
-// ── Day-start text marker (small square at the candle) ───────────────────────
-
-function createDayStartMarker(dayStartMs: number | undefined, visibleCandles: Candle[]): SeriesMarker<Time>[] {
-  if (!dayStartMs) return [];
-  // Find the first candle at or after midnight KST
-  const midnightCandle = visibleCandles.find((c) => c.timestamp >= dayStartMs);
-  if (!midnightCandle) return [];
-  return [
-    {
-      time: toChartTime(midnightCandle.timestamp),
-      position: "belowBar",
-      shape: "square",
-      color: "#7c6af7",
-      text: "00:00",
-      size: 0,
-    },
-  ];
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
-
 function getChartColors(themeMode: "light" | "dark") {
   if (themeMode === "dark") {
     return {
@@ -640,8 +858,6 @@ function getChartColors(themeMode: "light" | "dark") {
       down: "#ef8181",
       volumeUp: "rgba(107, 208, 164, 0.32)",
       volumeDown: "rgba(239, 129, 129, 0.32)",
-      preDay: "rgba(169, 186, 179, 0.28)",
-      preDayVolume: "rgba(169, 186, 179, 0.12)",
     };
   }
 
@@ -653,7 +869,5 @@ function getChartColors(themeMode: "light" | "dark") {
     down: "#c44e4e",
     volumeUp: "rgba(22, 128, 90, 0.34)",
     volumeDown: "rgba(196, 78, 78, 0.32)",
-    preDay: "rgba(101, 117, 111, 0.30)",
-    preDayVolume: "rgba(101, 117, 111, 0.12)",
   };
 }

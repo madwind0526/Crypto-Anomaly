@@ -106,3 +106,13 @@ public/market/
 - **시뮬레이션**: Node.js + TypeScript (esbuild 번들링)
 - **데이터**: Upbit Public API (REST)
 - **차트**: lightweight-charts v5 (캔들 + 볼륨 + 커스텀 프리미티브)
+
+## Current Daily Workflow
+
+Anomaly keeps the A/B/C/D trading logic, but now follows the same operating workflow as General:
+
+1. Fetch top-30 KRW markets as 1-minute candles for 7 days with `npm run fetch:anomaly:1m:backtracking`.
+2. Run `npm run sim:anomaly` to optimize per-coin Anomaly parameters from the 1m/7d backtracking set.
+3. At KST 00:00, if the previous 24h has enough 1-minute candles, refit is a minor weighted adjustment: previous params 70%, previous-24h refit params 30%. If not enough data exists, refit is skipped and the 1m/7d parameters stay active.
+4. Each Anomaly variant still uses its own logic, but each variant selects the top 9 markets from the same top-30 candidate pool. The display is 3x3 per active variant.
+5. `npm run fetch:anomaly:1m` fetches the current selected union for daily operation, and `npm run sim:anomaly:watchdog` keeps daily operation refreshed. WS live uses the same selection file.

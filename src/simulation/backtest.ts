@@ -30,6 +30,7 @@ export function runBacktest(
   const trades: Trade[] = [];
   const signalAudit: SignalAudit[] = [];
   const equityCurve: Array<{ timestamp: number; value: number }> = [];
+  let lastSellPrice: number | undefined;
   let peakValue = config.initialCash;
   let maxDrawdown = 0;
   const roundTripReturns: number[] = [];
@@ -73,6 +74,7 @@ export function runBacktest(
         candleIndex,
         position,
         portfolioValue,
+        lastSellPrice,
       },
       scenario,
     );
@@ -163,25 +165,6 @@ export function runBacktest(
   const grossProfit = wins.reduce((sum, value) => sum + value, 0);
   const grossLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
 
-  return {
-    strategyId: strategy.id,
-    scenarioId: scenario.id,
-    scenarioName: scenario.name,
-    market: candles[0]?.market ?? "UNKNOWN",
-    finalValue,
-    returnRate: (finalValue - config.initialCash) / config.initialCash,
-    maxDrawdown,
-    winRate: roundTripReturns.length === 0 ? 0 : wins.length / roundTripReturns.length,
-    tradeCount: trades.length,
-    profitFactor: grossLoss === 0 ? grossProfit : grossProfit / grossLoss,
-    worstTradeReturn: roundTripReturns.length === 0 ? 0 : Math.min(...roundTripReturns),
-    guideRuleMode,
-    guideRejectedSignals: signalAudit.filter((signal) => signal.rawAction !== signal.finalAction).length,
-    trades,
-    signalAudit,
-    equityCurve,
-  };
-
   function closePosition(
     price: number,
     reasonCodes: string[],
@@ -206,7 +189,27 @@ export function runBacktest(
       guideRuleEvaluation,
     });
     cash += proceeds - fee;
+    lastSellPrice = price;
     position = null;
     return entryCost === 0 ? 0 : realized / entryCost;
   }
+
+  return {
+    strategyId: strategy.id,
+    scenarioId: scenario.id,
+    scenarioName: scenario.name,
+    market: candles[0]?.market ?? "UNKNOWN",
+    finalValue,
+    returnRate: (finalValue - config.initialCash) / config.initialCash,
+    maxDrawdown,
+    winRate: roundTripReturns.length === 0 ? 0 : wins.length / roundTripReturns.length,
+    tradeCount: trades.length,
+    profitFactor: grossLoss === 0 ? grossProfit : grossProfit / grossLoss,
+    worstTradeReturn: roundTripReturns.length === 0 ? 0 : Math.min(...roundTripReturns),
+    guideRuleMode,
+    guideRejectedSignals: signalAudit.filter((signal) => signal.rawAction !== signal.finalAction).length,
+    trades,
+    signalAudit,
+    equityCurve,
+  };
 }
