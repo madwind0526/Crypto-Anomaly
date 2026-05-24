@@ -24,8 +24,13 @@ const selectionPath = path.join(root, "public", "market", "anomaly-selection.jso
 let markets = [];
 try {
   const saved = JSON.parse(await readFile(selectionPath, "utf8"));
-  markets = (saved.markets ?? []).map(m => m.market).filter(Boolean);
-  console.log(`Selection date: KST ${saved.date}  (${markets.length} markets)`);
+  // Fetch ALL candidate markets (backtracking-based), not just anomaly-detected ones.
+  // The optimizer may select any of the 30 candidates for its plan; those markets need
+  // live 1m candles or they will be silently filtered out of the Daily Operation charts.
+  const candidateMarkets = Array.isArray(saved.candidateMarkets) ? saved.candidateMarkets : [];
+  const anomalyMarkets = (saved.markets ?? []).map(m => m.market).filter(Boolean);
+  markets = [...new Set([...candidateMarkets, ...anomalyMarkets])];
+  console.log(`Selection date: KST ${saved.date}  (${anomalyMarkets.length} anomaly + ${candidateMarkets.length} candidates = ${markets.length} unique markets)`);
 } catch (err) {
   if (err.code === "ENOENT") {
     console.error([

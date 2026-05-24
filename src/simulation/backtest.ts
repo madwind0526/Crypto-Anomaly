@@ -63,6 +63,13 @@ export function runBacktest(
         }
         const roundTripReturn = closePosition(exitPrice, ["risk-rule-exit", exitReason], candle.timestamp);
         roundTripReturns.push(roundTripReturn);
+        // Skip strategy decision for this candle — re-entry on the same candle as a
+        // risk exit is impossible in live trading and inflates backtest returns.
+        const currentValue = cash;
+        peakValue = Math.max(peakValue, currentValue);
+        maxDrawdown = Math.max(maxDrawdown, peakValue === 0 ? 0 : (peakValue - currentValue) / peakValue);
+        equityCurve.push({ timestamp: candle.timestamp, value: currentValue });
+        continue;
       }
     }
 

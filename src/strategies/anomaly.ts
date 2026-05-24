@@ -90,7 +90,8 @@ export const anomalyStrategy: Strategy = {
     const relativeVolume = current.volume / averageVolume;
     const isAccelerating = acceleration >= scenario.params.accelerationMin;
     const isTooExtended = extendedMove >= scenario.params.maxExtendedMove;
-    const breaksHigh = current.close >= Math.max(...indicators.closes.slice(Math.max(0, candleIndex - 24), candleIndex));
+    const lookbackCloses = indicators.closes.slice(Math.max(0, candleIndex - 24), candleIndex);
+    const breaksHigh = lookbackCloses.length === 0 || current.close >= lookbackCloses.reduce((a, b) => (b > a ? b : a), -Infinity);
 
     if (relativeVolume >= scenario.params.relativeVolumeMin && isAccelerating && breaksHigh && !isTooExtended) {
       return {

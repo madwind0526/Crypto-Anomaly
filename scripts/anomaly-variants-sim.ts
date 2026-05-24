@@ -33,7 +33,7 @@
  */
 
 import { exec } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { runOptimization, type OptimizedParams } from "./optimize-params";
 
@@ -59,6 +59,8 @@ const dashPath          = path.join(outputDir, "dashboard-results.json");
 const selectionPath     = path.join(outputDir, "anomaly-selection.json");
 const daily1mPath       = path.join(outputDir, "upbit-krw-1m-daily.json");
 const optimizedParamsPath = path.join(outputDir, "anomaly-optimized-params.json");
+const docsDir           = path.join(root, "docs");
+const simLogPath        = path.join(docsDir, "simulation-log.md");
 
 // Per-coin optimized parameters loaded at 00:00. Keyed by market → slotId → params.
 let perCoinParams: OptimizedParams = {};
@@ -184,9 +186,10 @@ function selectAnomalyMarkets(
   }
 
   // Scan live 1m (last 24h) — catches recent events not yet in backtracking
+  // Require > warmup (70) candles so the detector loop runs at least once.
   for (const [market, candles] of Object.entries(live1m)) {
     const recent24h = candles.filter(c => c.timestamp >= oneDayAgo);
-    if (recent24h.length < 70) continue;
+    if (recent24h.length < 100) continue;
     const events = detect1m(market, recent24h);
     if (events.length === 0) continue;
     const lastTs   = events[events.length - 1].timestamp;
@@ -644,6 +647,63 @@ async function readJsonOrNull<T>(filePath: string): Promise<T | null> {
   catch { return null; }
 }
 
+// ─── daily log ────────────────────────────────────────────────────────────────
+const STRATEGY_META: Array<{ id: TraderId; label: string }> = [
+  { id: "momentum",   label: "Anomaly-A (Calm Impulse)"    },
+  { id: "range-grid", label: "Anomaly-B (First Explosion)"  },
+  { id: "arbitrage",  label: "Anomaly-C (Confirmed Burst)"  },
+  { id: "anomaly",    label: "Anomaly-D (Sweep Best)"       },
+];
+
+function fmtPct(r: number) {
+  const sign = r > 0 ? "+" : "";
+  return `${sign}${(r * 100).toFixed(2)}%`;
+}
+
+async function appendDailyLog(date: string): Promise<void> {
+  const paper = await readJsonOrNull<any>(paperPath);
+  if (!paper?.caseResults) {
+    console.warn("[daily-log] paper results not found — skipping log");
+    return;
+  }
+
+  const cases = paper.caseResults as Record<string, Record<string, Record<string, any>>>;
+
+  const rows = STRATEGY_META.map(({ id, label }) => {
+    function cell(guide: string, safety: string) {
+      const r = cases[guide]?.[safety]?.[id];
+      if (!r) return "- (0t)";
+      return `${fmtPct(r.returnRate)} (${r.trades?.length ?? 0}t)`;
+    }
+    return `| ${label} | ${cell("strict","enabled")} | ${cell("strict","disabled")} | ${cell("ignored","enabled")} | ${cell("ignored","disabled")} |`;
+  });
+
+  const block = [
+    `## ${date}`,
+    ``,
+    `| 전략 | Guide O / Safe O | Guide O / Safe X | Guide X / Safe O | Guide X / Safe X |`,
+    `|------|:----------------:|:----------------:|:----------------:|:----------------:|`,
+    ...rows,
+    ``,
+    `> 기록 시각: ${new Date().toISOString()}`,
+    ``,
+    `---`,
+    ``,
+  ].join("\n");
+
+  await mkdir(docsDir, { recursive: true });
+
+  // Create file with header if it doesn't exist yet
+  let exists = false;
+  try { await readFile(simLogPath, "utf8"); exists = true; } catch { /* new file */ }
+  if (!exists) {
+    await writeFile(simLogPath, "# Anomaly Simulation Daily Log\n\n", "utf8");
+  }
+
+  await appendFile(simLogPath, block, "utf8");
+  console.log(`  ✓ daily log appended → ${path.relative(root, simLogPath)}`);
+}
+
 function countMarketsWithWindowData(candlesByMarket: Record<string, Candle[]>, start: number, end: number, markets: string[]): number {
   return markets.filter(market => (candlesByMarket[market] ?? []).filter(c => c.timestamp >= start && c.timestamp < end).length >= REFIT_MIN_CANDLES).length;
 }
@@ -703,12 +763,24 @@ async function runCycle() {
     live1mSource = "(not fetched yet — run 'npm run fetch:anomaly:1m' after selection)";
   }
 
-  const rawBacktracking = JSON.parse(await readFile(backtracking1mPath, "utf8"));
+  let rawBacktracking: any;
+  try {
+    rawBacktracking = JSON.parse(await readFile(backtracking1mPath, "utf8"));
+  } catch {
+    throw new Error(
+      `Backtracking data not found at ${backtracking1mPath}. ` +
+      "Run 'npm run fetch:anomaly:1m:backtracking' first.",
+    );
+  }
 
   const live1m: Record<string, Candle[]> = rawLive.candlesByMarket ?? {};
   const backtracking1m: Record<string, Candle[]> = rawBacktracking.candlesByMarket ?? {};
 
   const today = kstDateString();
+  // Reset on every cycle so a new day always triggers fresh optimization.
+  // Without this, the global stays populated from the previous day and the
+  // `Object.keys(perCoinParams).length === 0` guard below never fires.
+  perCoinParams = {};
   const optimizedCache = await readJsonOrNull<any>(optimizedParamsPath);
   if (optimizedCache?.date === today && typeof optimizedCache.source === "string" && optimizedCache.source.startsWith("1m-7d-backtracking") && optimizedCache.params) {
     perCoinParams = optimizedCache.params ?? {};
@@ -992,13 +1064,24 @@ await runCycle();
 if (LOOP_MS > 0) {
   console.log(`\nLoop mode active - re-running every ${LOOP_MS / 1000}s\n`);
   let running = false;
+  let lastDate = kstDateString();
+
   setInterval(async () => {
     if (running) {
       console.warn("[loop] previous cycle is still running; skipping this tick");
       return;
     }
     running = true;
-    try { await runCycle(); }
+    try {
+      const today = kstDateString();
+      if (today !== lastDate) {
+        // 날짜가 바뀌었다 = 전날 시뮬레이션이 막 끝남 → 결과를 로그에 기록
+        console.log(`\n[daily-log] Date changed ${lastDate} → ${today}. Saving previous day's results...`);
+        await appendDailyLog(lastDate);
+        lastDate = today;
+      }
+      await runCycle();
+    }
     catch (e) { console.error("[loop] error:", e); }
     finally { running = false; }
   }, LOOP_MS);

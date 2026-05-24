@@ -162,11 +162,23 @@ export function evaluateDowTheory(candles: Candle[], candleIndex: number): DowTh
   };
 }
 
+interface EmaSeriesCache {
+  short: Array<number | null>;
+  medium: Array<number | null>;
+  long: Array<number | null>;
+}
+const emaSeriesCache = new WeakMap<Candle[], EmaSeriesCache>();
+
 export function evaluateMovingAverages(candles: Candle[], candleIndex: number): MovingAverageEvaluation {
-  const closes = candles.map((candle) => candle.close);
-  const short = ema(closes, 10);
-  const medium = ema(closes, 50);
-  const long = ema(closes, 100);
+  let cached = emaSeriesCache.get(candles);
+  if (!cached) {
+    const closes = candles.map((candle) => candle.close);
+    cached = { short: ema(closes, 10), medium: ema(closes, 50), long: ema(closes, 100) };
+    emaSeriesCache.set(candles, cached);
+  }
+  const short = cached.short;
+  const medium = cached.medium;
+  const long = cached.long;
   const shortValue = short[candleIndex];
   const mediumValue = medium[candleIndex];
   const longValue = long[candleIndex];

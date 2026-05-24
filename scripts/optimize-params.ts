@@ -256,10 +256,15 @@ function backtestD(
         maxDrawdown = Math.max(maxDrawdown, peakCash > 0 ? (peakCash - cash) / peakCash : 0);
       } else { pos.hold++; }
     } else {
-      if (avgVol === null) continue;
+      const roc48 = ind.roc48[i];
+      if (avgVol === null || roc48 === null) continue;
       const volR = candles[i].volume / avgVol;
       const roc3 = i >= 3 ? (candles[i].close - candles[i - 3].close) / (candles[i - 3].close || 1) : 0;
-      if (volR >= 3.0 && roc3 >= accelerationMin && candles[i].close > candles[i].open) {
+      // Mirror anomalyStrategy.decide(): relativeVolumeMin=3.5, breaksHigh, !isTooExtended(roc48>=0.18)
+      const prevHigh = candles.slice(Math.max(0, i - 24), i).reduce((a, c) => (c.close > a ? c.close : a), -Infinity);
+      const breaksHigh = i < 24 || candles[i].close >= prevHigh;
+      const isTooExtended = roc48 >= 0.18;
+      if (volR >= 3.5 && roc3 >= accelerationMin && breaksHigh && !isTooExtended) {
         pos = openPos(price);
       }
     }

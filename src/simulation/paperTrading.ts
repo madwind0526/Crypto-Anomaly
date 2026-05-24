@@ -292,14 +292,16 @@ export function runPaperTradingSimulation(
 }
 
 function resolveOptions(options: Partial<PaperTradingOptions>) {
+  // guideRuleMode / autoBlockMode are top-level options — keep them there only.
+  // BacktestConfig (feeRate, slippageRate, initialCash) is merged separately.
   return {
     ...defaultOptions,
     ...options,
+    guideRuleMode: options.guideRuleMode ?? defaultOptions.guideRuleMode,
+    autoBlockMode: options.autoBlockMode ?? defaultOptions.autoBlockMode,
     config: {
       ...defaultOptions.config,
       ...options.config,
-      guideRuleMode: options.guideRuleMode ?? options.config?.guideRuleMode ?? defaultOptions.guideRuleMode,
-      autoBlockMode: options.autoBlockMode ?? options.config?.autoBlockMode ?? defaultOptions.autoBlockMode,
     },
   };
 }

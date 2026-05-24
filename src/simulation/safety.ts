@@ -25,7 +25,15 @@ export function getDailyReturnAtCandleIndex(candles: Candle[], candleIndex: numb
   const candle = candles[candleIndex];
   if (!candle) return 0;
   const dayStart = getKstDayStart(candle.timestamp);
-  const first = candles.find((item) => item.timestamp >= dayStart && item.timestamp <= candle.timestamp);
+  // Binary search for the first candle at or after dayStart within [0, candleIndex].
+  let lo = 0;
+  let hi = candleIndex;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (candles[mid].timestamp < dayStart) lo = mid + 1;
+    else hi = mid;
+  }
+  const first = lo <= candleIndex && candles[lo].timestamp >= dayStart ? candles[lo] : null;
   if (!first || first.close === 0) return 0;
   return (candle.close - first.close) / first.close;
 }
