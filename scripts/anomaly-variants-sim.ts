@@ -840,11 +840,19 @@ async function runCycle() {
   let candidateMarketLastEvents: Record<string, number>;
 
   if (cachedSelection?.date === today && Array.isArray(cachedSelection.candidateMarkets)) {
-    // ── Same-day cache hit: reuse today's pool as-is ──────────────────────────
+    // ── Same-day cache hit: reuse today's pool, but merge any new event timestamps ──
+    // Merging ensures tomorrow's cycleScore reflects the most recent events today,
+    // not the stale 00:00 snapshot.
     candidateMarketNames = cachedSelection.candidateMarkets.filter(
       (market: unknown): market is string => typeof market === "string",
     );
-    candidateMarketLastEvents = cachedSelection.candidateMarketLastEvents ?? {};
+    const cachedLastEvents: Record<string, number> = cachedSelection.candidateMarketLastEvents ?? {};
+    const mergedToday: Record<string, number> = { ...cachedLastEvents };
+    for (const info of detectedAnomalyMarkets) {
+      const prev = mergedToday[info.market] ?? 0;
+      if (info.lastEventTs > prev) mergedToday[info.market] = info.lastEventTs;
+    }
+    candidateMarketLastEvents = mergedToday;
   } else {
     // ── Date changed (or first run): accumulate pool ──────────────────────────
     // Design:
@@ -894,7 +902,11 @@ async function runCycle() {
       }
     }
   }
-  const isNewSelection = cachedSelection?.date !== today || !Array.isArray(cachedSelection?.markets) || cachedSelection?.source !== "1m-7d-backtracking" || cachedSelection?.monitoringMarketCount !== MONITORING_MARKET_COUNT;
+  const isNewSelection =
+    cachedSelection?.date !== today ||
+    !Array.isArray(cachedSelection?.markets) ||
+    cachedSelection?.source !== "1m-7d-backtracking" ||
+    cachedSelection?.monitoringMarketCount !== MONITORING_MARKET_COUNT;
 
   if (candidateMarketNames.length === 0) {
     throw new Error("No anomaly candidate markets. Run npm run fetch:anomaly:1m:backtracking first.");

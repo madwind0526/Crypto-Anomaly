@@ -66,8 +66,9 @@ function computeInd(candles: Candle[]): Ind {
 interface Pos { entry: number; high: number; hold: number; }
 
 function openPos(price: number): Pos {
-  // Apply entry slippage (buy at slightly higher price)
-  return { entry: price * (1 + SLIPPAGE_RATE), high: price, hold: 0 };
+  // Apply entry slippage and fee (mirrors backtest.ts: fee charged on both buy and sell)
+  const fillPrice = price * (1 + SLIPPAGE_RATE);
+  return { entry: fillPrice * (1 + FEE_RATE), high: price, hold: 0 };
 }
 
 function closePos(pos: Pos, exitPrice: number, cash: number): number {
@@ -246,7 +247,9 @@ function backtestD(
     if (pos) {
       pos.high = Math.max(pos.high, candles[i].high);
       const stop = pos.high * (1 - trail);
-      if (price <= stop || pos.hold >= maxHold) {
+      // Mirror anomalyStrategy.decide() exit: volumeFade fires when volume drops below avg
+      const fade = avgVol !== null && candles[i].volume < avgVol * 1.2;
+      if (price <= stop || fade || pos.hold >= maxHold) {
         const exitPrice = price <= stop ? stop : price;
         const prevCash = cash;
         cash = closePos(pos, exitPrice, cash);

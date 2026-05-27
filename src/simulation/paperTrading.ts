@@ -96,12 +96,52 @@ export function runPaperTradingSimulation(
     }
 
     if (position) {
-      const candle = candlesAtTime.get(position.market)?.candle;
+      const pos = position;
+      const candle = candlesAtTime.get(pos.market)?.candle;
       if (candle) {
-        position.highestPrice = Math.max(position.highestPrice, candle.high);
+        pos.highestPrice = Math.max(pos.highestPrice, candle.high);
         if (lastPositionCandleTimestamp !== candle.timestamp) {
-          position.holdCandles += 1;
+          pos.holdCandles += 1;
           lastPositionCandleTimestamp = candle.timestamp;
+        }
+
+        // ── Risk rule exits (trailing stop / stop-loss / take-profit) ──────
+        // Mirrors backtest.ts logic so paper-trading and backtest results are comparable.
+        const posSelected     = selectedMarkets.find(s => s.market === pos.market);
+        const posScenario     = posSelected
+          ? (scenarioById.get(posSelected.bestResult.scenarioId) ?? strategy.defaultScenario)
+          : strategy.defaultScenario;
+        const stopPrice       = posScenario.params.stopLossPct
+          ? pos.averagePrice * (1 - posScenario.params.stopLossPct) : null;
+        const trailingStop    = posScenario.params.trailingStopPct
+          ? pos.highestPrice * (1 - posScenario.params.trailingStopPct) : null;
+        const takeProfitPrice = posScenario.params.takeProfitPct
+          ? pos.averagePrice * (1 + posScenario.params.takeProfitPct) : null;
+
+        const takeProfitHit   = takeProfitPrice !== null && candle.high >= takeProfitPrice;
+        const trailingStopHit = trailingStop    !== null && candle.low  <= trailingStop;
+        const stopLossHit     = stopPrice       !== null && candle.low  <= stopPrice;
+
+        if (takeProfitHit || trailingStopHit || stopLossHit) {
+          let exitPrice: number;
+          let exitReason: string;
+          if (takeProfitHit) {
+            exitPrice  = takeProfitPrice!;
+            exitReason = "take-profit";
+          } else if (trailingStopHit && trailingStop! >= (stopPrice ?? -Infinity)) {
+            exitPrice  = Math.min(candle.close, trailingStop!);
+            exitReason = "trailing-stop";
+          } else {
+            exitPrice  = Math.min(candle.close, stopPrice!);
+            exitReason = "stop-loss";
+          }
+          cash += closePosition(pos, exitPrice * (1 - resolved.config.slippageRate), timestamp, ["risk-rule-exit", exitReason]);
+          position = null;
+          lastPositionCandleTimestamp = null;
+          const riskPortfolioValue = getPortfolioValue(cash, null, candlesAtTime);
+          decisions.push({ timestamp, action: "sell", sellMarket: pos.market, portfolioValue: riskPortfolioValue, cash, reasonCodes: ["risk-rule-exit", exitReason] });
+          equityCurve.push({ timestamp, value: riskPortfolioValue });
+          continue;
         }
       }
     }
