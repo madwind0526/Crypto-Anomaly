@@ -220,3 +220,48 @@ detectAnomalyEvents 1m 경로 검증 필요.
 - Kept Anomaly A/B/C/D decision logic intact; selection/report uses optimized per-coin params, daily simulation runs the existing strategy logic.
 - Added 00:00 KST refit rule: skip if previous 24h data is insufficient; otherwise blend previous params and previous-24h params with 70/30 weighting.
 - Updated daily operation cards to responsive 3-column layout and refreshed selection/daily/WS files.
+
+## 2026-05-28 - Pool 누적 로직 복원 (버그 수정)
+
+### 문제
+2026-05-23 변경에서 candidateMarkets pool이 **매일 재생성**되는 방식으로 잘못 구현됨:
+- 날짜가 바뀌면 전날 pool을 버리고 당일 backtracking 감지 결과로 교체
+- REMOVAL_DAYS=7 로 설정되어 7일간 이벤트 없으면 즉시 제거
+- 결과: pool이 5개로 축소 (원래 설계 의도인 누적 pool 동작하지 않음)
+
+### 수정된 로직
+
+```
+매일 00:00 KST reset 시:
+  1. 전날 candidateMarkets pool 로드 (anomaly-selection.json에서)
+  2. 7일 backtracking 스캔으로 새로 감지된 종목 추출
+  3. Union: 전날 pool ∪ 새로 감지된 종목 (중복 제거, 갯수 무관)
+  4. 제거: 마지막 특이점 이벤트가 45일 초과된 종목만 제거 (POOL_REMOVAL_DAYS=45)
+  5. 결과 pool에서 top 9 선정 → 페이퍼 트레이딩 진행
+  6. 나머지는 pool에 유지 (monitoring list)
+
+첫 실행 (pool 없을 때):
+  - 거래량 기준 상위 30개 종목으로 초기 시드
+```
+
+### 코드 변경
+- `scripts/anomaly-variants-sim.ts`
+  - `POOL_REMOVAL_DAYS = 45` 상수 추가 (기존 `REMOVAL_DAYS=7`는 detection 전용으로 유지)
+  - `candidateMarketLastEvents` 타입 추가: 각 종목의 마지막 이벤트 타임스탬프 추적
+  - 날짜 변경 분기: `else if / else` (교체) → Union 누적 + 45일 제거 로직으로 교체
+  - `anomaly-selection.json`에 `candidateMarketLastEvents` 필드 저장 (pool 영속성 보장)
+
+### 종목 선택 기준 (확정)
+
+```
+전체 KRW 종목 → 거래량 상위 30개 (초기 시드)
+→ 7일 backtracking 스캔으로 특이점 종목 탐지
+→ Union 누적 (매일 추가, 갯수 무관)
+→ 45일 미발생 시 제거
+→ 이 pool에서 top 9 선정 (백테스트 수익률 기준)
+→ 나머지는 monitoring list로 유지
+```
+
+### 제거 기준 근거 (PROGRESS.md 기존 데이터)
+- Gap 분포: p50=2.5일, p90=32.7일, max=72일
+- **45일 제거** → 전체 반복 이벤트의 95% 커버 (검증됨)

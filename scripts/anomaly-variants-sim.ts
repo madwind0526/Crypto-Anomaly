@@ -71,8 +71,9 @@ const SAFETY_MODES       = ["enabled", "disabled"] as SafetyMode[];
 const MAX_BACKTRACKING_CANDLES = Number(process.env.MAX_BACKTRACKING_CANDLES ?? 10_080);
 const LOOP_MS            = Number(process.env.LOOP_INTERVAL_MS ?? 0);
 const LOOKBACK_DAYS      = Number(process.env.LOOKBACK_DAYS    ?? 7);
-const REMOVAL_DAYS       = Number(process.env.REMOVAL_DAYS     ?? 7);
-const CANDIDATE_MARKET_COUNT = Number(process.env.ANOMALY_CANDIDATE_MARKET_COUNT ?? 30);
+const REMOVAL_DAYS       = Number(process.env.REMOVAL_DAYS     ?? 7);   // detection window (backtracking scan)
+const POOL_REMOVAL_DAYS  = Number(process.env.POOL_REMOVAL_DAYS ?? 45); // persistent pool: remove after 45d no event
+const CANDIDATE_MARKET_COUNT = Number(process.env.ANOMALY_CANDIDATE_MARKET_COUNT ?? 30); // seed size (first run)
 const MONITORING_MARKET_COUNT = Number(process.env.ANOMALY_MONITORING_MARKET_COUNT ?? 9);
 const TRADE_VALUE_LOOKBACK_CANDLES = Number(process.env.ANOMALY_TRADE_VALUE_LOOKBACK_CANDLES ?? 1440);
 const REFIT_PREVIOUS_WEIGHT = clamp(Number(process.env.ANOMALY_REFIT_PREVIOUS_WEIGHT ?? 0.7), 0, 1);
@@ -806,18 +807,62 @@ async function runCycle() {
   console.log(`  Anomaly detection: ${detectedAnomalyMarkets.length} markets with events in last ${REMOVAL_DAYS} days`);
 
   let candidateMarketNames: string[];
+  let candidateMarketLastEvents: Record<string, number>;
+
   if (cachedSelection?.date === today && Array.isArray(cachedSelection.candidateMarkets)) {
+    // ── Same-day cache hit: reuse today's pool as-is ──────────────────────────
     candidateMarketNames = cachedSelection.candidateMarkets.filter(
-      (market: unknown): market is string => typeof market === "string" && Boolean(backtracking1m[market]),
+      (market: unknown): market is string => typeof market === "string",
     );
-  } else if (detectedAnomalyMarkets.length >= 5) {
-    // Use anomaly-event-based selection (core logic)
-    candidateMarketNames = detectedAnomalyMarkets.slice(0, CANDIDATE_MARKET_COUNT).map(m => m.market);
-    console.log(`  Using anomaly-based candidate selection: ${candidateMarketNames.length} markets`);
+    candidateMarketLastEvents = cachedSelection.candidateMarketLastEvents ?? {};
   } else {
-    // Fallback: not enough anomaly markets detected, rank by trade value
-    console.log(`  Anomaly detection found only ${detectedAnomalyMarkets.length} markets — falling back to trade-value ranking`);
-    candidateMarketNames = selectCandidateMarkets(backtracking1m);
+    // ── Date changed (or first run): accumulate pool ──────────────────────────
+    // Design:
+    //   1. Load previous pool from cache (persist across days)
+    //   2. Union with newly detected anomaly markets (adds new coins)
+    //   3. Remove markets with no event in last POOL_REMOVAL_DAYS (45 days)
+    //   4. If pool is empty (first run), seed with top-N by trade volume
+    const previousPool: string[] = Array.isArray(cachedSelection?.candidateMarkets)
+      ? cachedSelection.candidateMarkets.filter((m: unknown): m is string => typeof m === "string")
+      : [];
+    const previousLastEvents: Record<string, number> = cachedSelection?.candidateMarketLastEvents ?? {};
+
+    // Merge lastEventTs: keep the most recent value for each market
+    const mergedLastEvents: Record<string, number> = { ...previousLastEvents };
+    for (const info of detectedAnomalyMarkets) {
+      const prev = mergedLastEvents[info.market] ?? 0;
+      if (info.lastEventTs > prev) mergedLastEvents[info.market] = info.lastEventTs;
+    }
+
+    // Union: previous pool ∪ newly detected (no duplicates)
+    const poolSet = new Set<string>([...previousPool, ...detectedAnomalyMarkets.map(m => m.market)]);
+
+    // Remove markets with no event recorded in last POOL_REMOVAL_DAYS days
+    const poolRemovalCutoff = Date.now() - POOL_REMOVAL_DAYS * MS_DAY;
+    const retained = [...poolSet].filter(market => {
+      const lastTs = mergedLastEvents[market];
+      if (lastTs === undefined) return true; // no record yet → keep (newly seeded)
+      return lastTs >= poolRemovalCutoff;
+    });
+
+    if (retained.length === 0) {
+      // First run or all stale → seed with top-N by trade volume
+      console.log(`  Pool empty — seeding from trade-value top-${CANDIDATE_MARKET_COUNT} ranking`);
+      candidateMarketNames = selectCandidateMarkets(backtracking1m);
+      candidateMarketLastEvents = {};
+    } else {
+      candidateMarketNames = retained;
+      candidateMarketLastEvents = mergedLastEvents;
+      const newlyAdded = detectedAnomalyMarkets.filter(m => !previousPool.includes(m.market));
+      const removedCount = previousPool.filter(m => !retained.includes(m)).length;
+      console.log(
+        `  Pool update: ${previousPool.length} prev + ${newlyAdded.length} new` +
+        ` - ${removedCount} stale (>${POOL_REMOVAL_DAYS}d) = ${candidateMarketNames.length} total`,
+      );
+      if (newlyAdded.length > 0) {
+        console.log(`  Newly added: ${newlyAdded.map(m => m.market.replace("KRW-", "")).join(", ")}`);
+      }
+    }
   }
   const isNewSelection = cachedSelection?.date !== today || !Array.isArray(cachedSelection?.markets) || cachedSelection?.source !== "1m-7d-backtracking" || cachedSelection?.monitoringMarketCount !== MONITORING_MARKET_COUNT;
 
@@ -925,6 +970,7 @@ async function runCycle() {
     selectedAt: new Date().toISOString(),
     source: "1m-7d-backtracking",
     candidateMarkets: candidateMarketNames,
+    candidateMarketLastEvents,   // lastEventTs per market — drives 45-day pool removal
     monitoringMarketCount: MONITORING_MARKET_COUNT,
     markets: selectedMarkets,
   }) + "\n", "utf8");
