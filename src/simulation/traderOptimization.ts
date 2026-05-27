@@ -14,6 +14,8 @@ export interface MarketScenarioOptimization {
   tradeValue: number;
   score: number;
   bestResult: BacktestResult;
+  /** 0~1 score based on days since last anomaly event. Peak (1.0) at 21–45 days. */
+  cycleScore?: number;
 }
 
 export interface TraderOptimizationOptions {

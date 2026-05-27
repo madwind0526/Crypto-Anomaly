@@ -493,6 +493,29 @@ function buildVariants(adaptedParams: Record<TraderId, AdaptedParams>): Variant[
   ];
 }
 
+// ─── cycle-based priority score ──────────────────────────────────────────────
+/**
+ * Score (0–1) that reflects how ready a market is for its next anomaly event.
+ *
+ * Based on historical gap distribution (p50=2.5d, p90=32.7d, prime=21-45d):
+ *  0–2 days  → 0.10  (just pumped, cooling off)
+ *  2–7 days  → 0.35  (early recovery)
+ *  7–21 days → 0.65  (approaching prime window)
+ * 21–45 days → 1.00  (PRIME: most likely to pump again)
+ *  >45 days  → 0.10  (stale; should be removed from pool)
+ *
+ * Markets with no recorded lastEventTs get a neutral 0.5 (no penalty).
+ */
+function computeCycleScore(lastEventTs: number | undefined, now: number): number {
+  if (!lastEventTs) return 0.5;
+  const daysSince = (now - lastEventTs) / MS_DAY;
+  if (daysSince <  2)  return 0.10;
+  if (daysSince <  7)  return 0.35;
+  if (daysSince < 21)  return 0.65;
+  if (daysSince <= 45) return 1.00;
+  return 0.10;
+}
+
 // ─── optimization plan builder ────────────────────────────────────────────────
 function buildOptimizationPlan(
   v:                  Variant,
@@ -501,6 +524,7 @@ function buildOptimizationPlan(
   backtracking1m:     Record<string, Candle[]>,
   live1m:             Record<string, Candle[]>,
   markets:            string[],
+  lastEvents:         Record<string, number> = {},
 ): TraderOptimizationPlan {
   const config = { ...defaultBacktestConfig, guideRuleMode };
 
@@ -545,11 +569,13 @@ function buildOptimizationPlan(
       ? sumRecentQuoteValue(liveCandles, TRADE_VALUE_LOOKBACK_CANDLES)
       : sumRecentQuoteValue(candles, TRADE_VALUE_LOOKBACK_CANDLES);
 
+    const cycleScore = computeCycleScore(lastEvents[market], Date.now());
     return {
       market,
       candidateRank: idx + 1,
       tradeValue: quoteVol,
       score: (btResult?.returnRate ?? -1) + Math.min((btResult?.tradeCount ?? 0) / 1000, 0.02),
+      cycleScore,
       bestResult: btResult ?? {
         strategyId: v.slotId, scenarioId: v.scenarioId, scenarioName: v.scenarioLabel,
         market, finalValue: 1_000_000, returnRate: 0, maxDrawdown: 0, winRate: 0,
@@ -559,7 +585,11 @@ function buildOptimizationPlan(
     };
   });
 
+  // Primary sort: cycleScore (21-45 days since last event = prime window = 1.0)
+  // Secondary: backtest returnRate (within same cycle tier, pick best performer)
+  // Tertiary: tradeValue (liquidity tiebreaker)
   optimizedMarkets.sort((a, b) =>
+    (b.cycleScore ?? 0.5) - (a.cycleScore ?? 0.5) ||
     b.bestResult.returnRate - a.bestResult.returnRate ||
     b.score - a.score ||
     b.tradeValue - a.tradeValue,
@@ -951,7 +981,7 @@ async function runCycle() {
   const plansByMode: Record<GuideRuleMode, TraderOptimizationPlan[]> = { ignored: [], strict: [] };
   for (const guideRuleMode of GUIDE_MODES) {
     for (const v of variants) {
-      plansByMode[guideRuleMode].push(buildOptimizationPlan(v, guideRuleMode, slicedBacktracking, backtracking1m, live1m, candidateMarketNames));
+      plansByMode[guideRuleMode].push(buildOptimizationPlan(v, guideRuleMode, slicedBacktracking, backtracking1m, live1m, candidateMarketNames, candidateMarketLastEvents));
     }
   }
 
