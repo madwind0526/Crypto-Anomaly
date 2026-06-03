@@ -74,6 +74,9 @@ const LOOKBACK_DAYS      = Number(process.env.LOOKBACK_DAYS    ?? 7);
 const REMOVAL_DAYS       = Number(process.env.REMOVAL_DAYS     ?? 7);   // detection window (backtracking scan)
 const POOL_REMOVAL_DAYS  = Number(process.env.POOL_REMOVAL_DAYS ?? 45); // persistent pool: remove after 45d no event
 const CANDIDATE_MARKET_COUNT = Number(process.env.ANOMALY_CANDIDATE_MARKET_COUNT ?? 30); // seed size (first run)
+// 가격 필터: 실매매 대상과 동일 범위로 제한 (fetch-upbit-market-data와 동일 기본값)
+const CANDIDATE_MIN_PRICE = Number(process.env.UPBIT_MIN_PRICE ?? 100);
+const CANDIDATE_MAX_PRICE = Number(process.env.UPBIT_MAX_PRICE ?? 10_000);
 const MONITORING_MARKET_COUNT = Number(process.env.ANOMALY_MONITORING_MARKET_COUNT ?? 9);
 const TRADE_VALUE_LOOKBACK_CANDLES = Number(process.env.ANOMALY_TRADE_VALUE_LOOKBACK_CANDLES ?? 1440);
 const REFIT_PREVIOUS_WEIGHT = clamp(Number(process.env.ANOMALY_REFIT_PREVIOUS_WEIGHT ?? 0.7), 0, 1);
@@ -625,12 +628,22 @@ function sumRecentQuoteValue(candles: Candle[], count: number): number {
 
 function selectCandidateMarkets(backtracking1m: Record<string, Candle[]>): string[] {
   return Object.entries(backtracking1m)
-    .map(([market, candles]) => ({
-      market,
-      tradeValue: sumRecentQuoteValue(candles, TRADE_VALUE_LOOKBACK_CANDLES),
-      candleCount: candles.length,
-    }))
-    .filter(item => item.candleCount >= 60 && item.tradeValue > 0)
+    .map(([market, candles]) => {
+      const lastPrice = candles.at(-1)?.close ?? 0;
+      return {
+        market,
+        lastPrice,
+        tradeValue: sumRecentQuoteValue(candles, TRADE_VALUE_LOOKBACK_CANDLES),
+        candleCount: candles.length,
+      };
+    })
+    // 100원~10,000원 가격 범위 필터 (fetch-upbit-market-data와 동일 기준)
+    .filter(item =>
+      item.candleCount >= 60 &&
+      item.tradeValue > 0 &&
+      item.lastPrice >= CANDIDATE_MIN_PRICE &&
+      item.lastPrice <= CANDIDATE_MAX_PRICE,
+    )
     .sort((a, b) => b.tradeValue - a.tradeValue)
     .slice(0, CANDIDATE_MARKET_COUNT)
     .map(item => item.market);

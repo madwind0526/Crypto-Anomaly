@@ -18,6 +18,9 @@ const DERIVED_CANDLE_PAGES =
       : 6;
 const CANDLE_PAGES = Number(process.env.UPBIT_CANDLE_PAGES ?? DERIVED_CANDLE_PAGES);
 const MARKET_COUNT = Number(process.env.UPBIT_MARKET_COUNT ?? 30);
+// 가격 필터: 너무 싼 코인(유동성 불안정)이나 너무 비싼 코인(BTC 등, 틱 슬리피지 과다)은 제외
+const MIN_PRICE = Number(process.env.UPBIT_MIN_PRICE ?? 100);    // 기본 100원
+const MAX_PRICE = Number(process.env.UPBIT_MAX_PRICE ?? 10_000); // 기본 10,000원
 const REQUEST_DELAY_MS = Number(process.env.UPBIT_REQUEST_DELAY_MS ?? 180);
 const MAX_RETRIES = Number(process.env.UPBIT_MAX_RETRIES ?? 4);
 const WRITE_PUBLIC_CACHE = process.env.UPBIT_WRITE_PUBLIC !== "false";
@@ -67,7 +70,7 @@ async function main() {
     explicitMarkets.length > 0
       ? explicitMarkets.filter((market) => krwMarkets.includes(market)).slice(0, MARKET_COUNT)
       : (await fetchTickers(krwMarkets))
-          .slice()
+          .filter((ticker) => ticker.trade_price >= MIN_PRICE && ticker.trade_price <= MAX_PRICE)
           .sort((a, b) => b.acc_trade_price_24h - a.acc_trade_price_24h)
           .slice(0, MARKET_COUNT)
           .map((ticker) => ticker.market);
