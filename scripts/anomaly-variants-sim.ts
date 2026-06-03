@@ -139,7 +139,7 @@ function detectAnomalyEvents(
     // volRatio ≥ 3 means the 10-min window has ≥ 1.5× the normal trading rate
     // (validated against hist5m analysis; consistent across 5m and 1m detectors).
     const prevHourCandles = candles.slice(i - hourCandles - windowCandles + 1, i - windowCandles + 1);
-    const avgPerCandle    = prevHourCandles.reduce((s, c) => s + c.quoteVolume, 0) / hourCandles;
+    const avgPerCandle    = prevHourCandles.reduce((s, c) => s + c.quoteVolume, 0) / Math.max(prevHourCandles.length, 1);
     const windowVol       = win.reduce((s, c) => s + c.quoteVolume, 0);
     const volRatio        = avgPerCandle > 0 ? windowVol / avgPerCandle : 0;
 
@@ -193,7 +193,7 @@ function selectAnomalyMarkets(
   // Require > warmup (70) candles so the detector loop runs at least once.
   for (const [market, candles] of Object.entries(live1m)) {
     const recent24h = candles.filter(c => c.timestamp >= oneDayAgo);
-    if (recent24h.length < 100) continue;
+    if (recent24h.length < 70) continue;
     const events = detect1m(market, recent24h);
     if (events.length === 0) continue;
     const lastTs   = events[events.length - 1].timestamp;
@@ -688,7 +688,7 @@ function selectedMarketSummaries(
     const events  = candles.length >= 70 ? detect1m(market, candles) : [];
     return {
       market,
-      lastEventTs:    events.length > 0 ? events[events.length - 1].timestamp : (candles.at(-1)?.timestamp ?? Date.now()),
+      lastEventTs:    events.length > 0 ? events[events.length - 1].timestamp : 0,
       histEventCount: events.length,
       liveEventCount: 0,
     };
@@ -952,7 +952,7 @@ async function runCycle() {
   }
   const isNewSelection =
     cachedSelection?.date !== today ||
-    !Array.isArray(cachedSelection?.markets) ||
+    !Array.isArray(cachedSelection?.candidateMarkets) ||
     cachedSelection?.source !== "1m-7d-backtracking" ||
     cachedSelection?.monitoringMarketCount !== MONITORING_MARKET_COUNT;
 
@@ -974,12 +974,14 @@ async function runCycle() {
     if (eligibleMarkets >= MONITORING_MARKET_COUNT) {
       console.log(`  Refit with previous 24h data: ${eligibleMarkets} eligible markets, weight previous=${REFIT_PREVIOUS_WEIGHT.toFixed(2)}`);
       const refitOpt = await runOptimization(live1m, previousDayStart, previousDayEnd, candidateMarketNames, today);
-      const previousParams = optimizedCache?.params ?? baseOpt.params;
-      perCoinParams = blendOptimizedParams(previousParams, refitOpt.params, REFIT_PREVIOUS_WEIGHT);
+      perCoinParams = blendOptimizedParams(baseOpt.params, refitOpt.params, REFIT_PREVIOUS_WEIGHT);
       await writeFile(optimizedParamsPath, JSON.stringify({
-        ...refitOpt,
         date: today,
         source: "1m-7d-backtracking+24h-refit",
+        generatedAt: new Date().toISOString(),
+        baseDurationMs: baseOpt.durationMs,
+        refitDurationMs: refitOpt.durationMs,
+        totalCombos: baseOpt.totalCombos + refitOpt.totalCombos,
         previousWeight: REFIT_PREVIOUS_WEIGHT,
         refitWindowStart: new Date(previousDayStart).toISOString(),
         refitWindowEnd: new Date(previousDayEnd).toISOString(),
@@ -989,9 +991,11 @@ async function runCycle() {
     } else {
       console.log(`  Refit skipped: ${eligibleMarkets}/${MONITORING_MARKET_COUNT} markets have enough previous-24h data. Using 1m/7d params.`);
       await writeFile(optimizedParamsPath, JSON.stringify({
-        ...baseOpt,
         date: today,
         source: "1m-7d-backtracking",
+        generatedAt: new Date().toISOString(),
+        baseDurationMs: baseOpt.durationMs,
+        totalCombos: baseOpt.totalCombos,
         refitSkipped: true,
         refitSkipReason: `Only ${eligibleMarkets} markets had enough previous-24h candles`,
         params: perCoinParams,

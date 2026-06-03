@@ -302,7 +302,10 @@ function decideD(candles: Candle[], i: number, position: LivePosition | null): S
       accelerationMin:  coinP.accelerationMin ?? 0.020,
       maxExtendedMove:  0.25,
     },
-  } : anomalyScenario;
+  } : {
+    ...anomalyScenario,
+    params: { ...anomalyScenario.params, accelerationMin: 0.020, maxExtendedMove: 0.25 },
+  };
 
   const pos = position ? {
     market, averagePrice: position.avgBuyPrice, quantity: parseFloat(position.quantity),
@@ -346,7 +349,7 @@ async function selectBestStrategy(): Promise<{ id: TraderId; name: string }> {
     const counts: Record<TraderId, number> = { momentum: 0, "range-grid": 0, arbitrage: 0, anomaly: 0 };
     for (const plan of plans) {
       const sid: TraderId = SLOT_MAP[plan.strategyId] ?? plan.strategyId;
-      if (!scores[sid] !== undefined) continue;
+      if (!(sid in scores)) continue;
       for (const m of plan.optimizedMarkets ?? []) {
         const rr = m?.bestResult?.returnRate;
         if (typeof rr === "number" && Number.isFinite(rr)) {
@@ -421,7 +424,10 @@ async function init() {
   selectedMarkets = Array.isArray(selection.markets)
     ? selection.markets.map((m: any) => m.market).filter((m: unknown) => typeof m === "string")
     : Array.isArray(selection.candidateMarkets)
-      ? selection.candidateMarkets.slice(0, MAX_POSITIONS)
+      ? (selection.candidateMarkets as unknown[])
+          .map((m) => typeof m === "string" ? m : (m as any)?.market)
+          .filter((m): m is string => typeof m === "string")
+          .slice(0, MAX_POSITIONS)
       : [];
   if (selectedMarkets.length === 0) throw new Error("anomaly-selection.json에 markets가 없습니다.");
 
@@ -818,7 +824,7 @@ function upsertCandle(arr: Candle[], candle: Candle) {
 // ── 전략 실행 (분봉 마감 시) ──────────────────────────────────────────────────
 async function processMinuteClose(market: string, _closed: Candle) {
   const candles = closedCandles[market];
-  if (!candles || candles.length < 60) return; // 워밍업
+  if (!candles || candles.length < 70) return; // 워밍업
 
   const position = state.positions[market] ?? null;
   const i = candles.length - 1;
@@ -870,6 +876,13 @@ function getDailyRealizedLoss(): number {
 async function executeBuy(market: string, price: number, reasonCodes: string[]) {
   if (orderInProgress.has(market)) return;
   if (Object.values(state.pendingBuys ?? {}).some(pb => pb.market === market)) return;
+  // 매도 직후 같은 캔들에서 즉시 재매수 차단 (over-trading 방지)
+  const lastSellTs = state.lastSellAt?.[market] ?? 0;
+  const curCandleTs = closedCandles[market]?.at(-1)?.timestamp ?? 0;
+  if (lastSellTs > 0 && curCandleTs > 0 && curCandleTs <= lastSellTs) {
+    console.log(`[live-trader] ${market.replace("KRW-", "")} 매도 직후 즉시 재매수 차단 (cooldown)`);
+    return;
+  }
   orderInProgress.add(market);
 
   try {
@@ -1003,7 +1016,10 @@ setInterval(() => {
 setInterval(() => {
   if (!state) return;
   const pos = Object.keys(state.positions).map(m => m.replace("KRW-", "")).join(", ") || "없음";
-  const bal = state.startBalance ? `수익: ${(Object.values(state.positions).reduce((s, p) => s + parseFloat(p.quantity) * getLatestPrice(p.market, p.avgBuyPrice), 0) - Object.values(state.positions).reduce((s, p) => s + parseFloat(p.quantity) * p.avgBuyPrice, 0)).toFixed(0)}원` : "";
+  const unrealizedPnl = Object.values(state.positions).reduce(
+    (s, p) => s + parseFloat(p.quantity) * (getLatestPrice(p.market, p.avgBuyPrice) - p.avgBuyPrice), 0,
+  );
+  const bal = state.startBalance ? `수익: ${unrealizedPnl.toFixed(0)}원` : "";
   console.log(`[live-trader] [${new Date().toISOString().slice(11, 19)}] 포지션: ${pos} | 거래: ${state.trades.length}회 | ${DRY_RUN ? "DRY-RUN" : "실매매"} | ${bal}`);
 }, 60_000);
 

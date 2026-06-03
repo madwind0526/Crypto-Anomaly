@@ -93,7 +93,7 @@ export const anomalyStrategy: Strategy = {
     const lookbackCloses = indicators.closes.slice(Math.max(0, candleIndex - 24), candleIndex);
     const breaksHigh = lookbackCloses.length === 0 || current.close >= lookbackCloses.reduce((a, b) => (b > a ? b : a), -Infinity);
 
-    if (relativeVolume >= scenario.params.relativeVolumeMin && isAccelerating && breaksHigh && !isTooExtended) {
+    if (relativeVolume >= scenario.params.relativeVolumeMin && isAccelerating && breaksHigh && !isTooExtended && current.close > current.open) {
       return {
         action: "buy",
         confidence: 0.61,

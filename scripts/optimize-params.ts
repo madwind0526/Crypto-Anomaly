@@ -273,11 +273,11 @@ function backtestD(
       if (avgVol === null || roc48 === null) continue;
       const volR = candles[i].volume / avgVol;
       const roc3 = i >= 3 ? (candles[i].close - candles[i - 3].close) / (candles[i - 3].close || 1) : 0;
-      // Mirror anomalyStrategy.decide(): relativeVolumeMin=3.5, breaksHigh, !isTooExtended(roc48>=0.18)
+      // Mirror anomalyStrategy.decide(): relativeVolumeMin=3.5, breaksHigh, !isTooExtended(roc48>=0.25, 1m 기준)
       const prevHigh = candles.slice(Math.max(0, i - 24), i).reduce((a, c) => (c.close > a ? c.close : a), -Infinity);
       const breaksHigh = i < 24 || candles[i].close >= prevHigh;
-      const isTooExtended = roc48 >= 0.18;
-      if (volR >= 3.5 && roc3 >= accelerationMin && breaksHigh && !isTooExtended) {
+      const isTooExtended = roc48 >= 0.25;
+      if (volR >= 3.5 && roc3 >= accelerationMin && breaksHigh && !isTooExtended && candles[i].close > candles[i].open) {
         pos = openPos(price);
       }
     }

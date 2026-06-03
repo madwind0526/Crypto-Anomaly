@@ -8,6 +8,7 @@ export interface SafetyEvaluation {
 export function evaluateSafetyBlock(result: BacktestResult, candles: Candle[], currentReturn: number): SafetyEvaluation {
   const reasons: string[] = [];
 
+  // 240봉 = 4시간(1m 기준). 자정 직후 데이터가 쌓이기 전까지 매수를 차단하는 의도적 설계.
   if (candles.length < 240) reasons.push("insufficient-1m-data");
   if (currentReturn <= -0.03) reasons.push("rapid-intraday-drop");
   if (currentReturn >= 0.12) reasons.push("overextended-chase-risk");

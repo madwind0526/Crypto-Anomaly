@@ -463,7 +463,7 @@ export function App() {
 
   const activeDailyScreen = isDailyScreenId(screenId) ? dailyScreens[screenId] : null;
   const isDailyScreen = activeDailyScreen !== null;
-  const activeDailyGuideMode = activeDailyScreen ? dailyGuideModes[screenId] ?? "strict" : reportGuideMode;
+  const activeDailyGuideMode = activeDailyScreen ? dailyGuideModes[screenId] ?? "ignored" : reportGuideMode;
   const activeDailyAutoBlockMode = activeDailyScreen ? dailyAutoBlockModes[screenId] ?? "enabled" : "enabled";
   const activeComparisons = comparisonsByMode[activeDailyGuideMode];
   const activeOptimizationPlans = optimizationPlansByMode[activeDailyGuideMode];
@@ -762,7 +762,7 @@ const ANOMALY_STRATEGY_INFO: Array<{
     id: "anomaly",
     label: "Anomaly-D",
     subtitle: "Sweep Best",
-    entry: "상대 거래량 ≥ 3.5×, 3봉 가격 가속 ≥ 4.5%, 24봉 고점 돌파, 과열 (48봉 ROC < 18%) 미초과.",
+    entry: "상대 거래량 ≥ 3.5×, 3봉 가격 가속 ≥ 2.0%, 24봉 고점 돌파, 과열 (48봉 ROC < 25%) 미초과.",
     hold: "최대 12봉 (12분)",
     trail: "1.8% (적응형)",
     exit: "거래량 fade (< 1.2× 평균) 또는 시간 초과",

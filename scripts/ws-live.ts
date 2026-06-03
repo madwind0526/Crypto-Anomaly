@@ -196,8 +196,10 @@ function checkEntryD(candles: Candle[], coinP?: OptParams | null): EntrySignal |
   const avgVol = getAvgVol48(candles, i); if (!avgVol) return null;
   const volR = candles[i].volume / avgVol;
   const accelerationMin = coinP?.accelerationMin ?? 0.020;
-  const roc3 = i >= 3 ? (candles[i].close - candles[i - 3].close) / (candles[i - 3].close || 1) : 0;
-  if (volR >= 3.0 && roc3 >= accelerationMin && candles[i].close > candles[i].open) {
+  const maxExtendedMove = 0.25; // 1m 기준 (anomaly.ts makeSweepBestScenario와 동일)
+  const roc3  = getRoc(candles, i, 3)  ?? 0;
+  const roc48 = getRoc(candles, i, 48) ?? 0;
+  if (volR >= 3.5 && roc3 >= accelerationMin && roc48 < maxExtendedMove && candles[i].close > candles[i].open) {
     return { trail: coinP?.trailingStopPct ?? 0.018, maxHold: coinP?.maxHoldCandles ?? 12 };
   }
   return null;
@@ -259,7 +261,8 @@ function onCandleClose(market: string, closedC: Candle) {
       state.pos.peak = Math.max(state.pos.peak, closedC.high);
       const stop  = state.pos.peak * (1 - (coinP?.trailingStopPct ?? getCoinTrail(slot, market)));
       const avgV  = getAvgVol48(candles, candles.length - 1);
-      const fade  = avgV !== null && closedC.volume < avgV * 1.2;
+      const fadeMul = slot === "range-grid" ? 1.3 : 1.2; // B전략 1.3× (anomaly-variants-sim.ts decideB와 일치)
+      const fade  = avgV !== null && closedC.volume < avgV * fadeMul;
       const rev   = getBody(closedC) < -0.008;
       state.pos.holdBars++;
       const maxHold = coinP?.maxHoldCandles ?? 8;
@@ -282,7 +285,8 @@ function onCandleClose(market: string, closedC: Candle) {
       state.pos.peak = Math.max(state.pos.peak, closedC.high);
       // Fade / reversal / time exit (trailing stop already triggered per-tick)
       const avgV  = getAvgVol48(candles, candles.length - 1);
-      const fade  = avgV !== null && closedC.volume < avgV * 1.2;
+      const fadeMul = slot === "range-grid" ? 1.3 : 1.2; // B전략 1.3× (anomaly-variants-sim.ts decideB와 일치)
+      const fade  = avgV !== null && closedC.volume < avgV * fadeMul;
       const rev   = getBody(closedC) < -0.008;
       const maxHold = coinP?.maxHoldCandles ?? 8;
       if (fade || rev || state.pos.holdBars >= maxHold) {
@@ -448,7 +452,14 @@ function connect() {
 async function init() {
   // 1. Load market selection
   const sel = JSON.parse(await readFile(selPath, "utf8"));
-  selectedMarkets = (sel.markets as Array<{ market: string }>).map(m => m.market);
+  if (Array.isArray(sel.markets)) {
+    selectedMarkets = (sel.markets as Array<{ market: string }>).map(m => m.market);
+  } else if (Array.isArray(sel.candidateMarkets)) {
+    selectedMarkets = (sel.candidateMarkets as unknown[])
+      .filter((m): m is string => typeof m === "string");
+  } else {
+    throw new Error("anomaly-selection.json에 markets / candidateMarkets 필드가 없습니다.");
+  }
   console.log(`[init] Selected markets: ${selectedMarkets.length}`);
 
   // 2. Load per-coin optimized params (optional)

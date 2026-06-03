@@ -188,8 +188,9 @@ async function fetchCandlesForWindow(market: string, start: number, end: number)
     if (page_candles.length === 0) break;
     all.push(...page_candles);
     const oldest = Math.min(...page_candles.map(c => c.timestamp));
+    const oldestNormalized = Math.min(...page_candles.map(c => candleStartMs(c)));
     to = new Date(oldest - 1).toISOString();
-    if (oldest <= start) break;
+    if (oldestNormalized <= start) break;
     await sleep(requestDelayMs);
   }
 
@@ -273,7 +274,10 @@ async function persistMarketParams(blendedParams: OptimizedParams): Promise<void
 }
 
 // ── candidateMarkets pool 갱신 ────────────────────────────────────────────
-async function updateCandidatePool(freshTopMarkets: string[]): Promise<void> {
+async function updateCandidatePool(
+  freshTopMarkets: string[],
+  candlesByMarket: Record<string, import("../src/types/trading").Candle[]>,
+): Promise<void> {
   const cached = await readJsonOrNull<any>(selectionPath);
   const prevPool: string[] = Array.isArray(cached?.candidateMarkets) ? cached.candidateMarkets : [];
   const prevLastEvents: Record<string, number> = cached?.candidateMarketLastEvents ?? {};
@@ -281,9 +285,15 @@ async function updateCandidatePool(freshTopMarkets: string[]): Promise<void> {
   const poolRemovalCutoff = Date.now() - poolRemovalDays * MS_DAY;
   const poolSet = new Set([...freshTopMarkets, ...prevPool]);
   const retained = [...poolSet].filter(market => {
-    if (freshTopMarkets.includes(market)) return true; // 새 top-30은 항상 유지
+    // 가격 범위 필터: candlesByMarket에 데이터가 있는 마켓만 검사
+    // (prevPool 전용 마켓은 가격 데이터 없으므로 sim 사이클에서 필터링)
+    const candles = candlesByMarket[market];
+    if (candles && candles.length > 0) {
+      const lastPrice = candles[candles.length - 1].close;
+      if (lastPrice > 0 && (lastPrice < minPrice || lastPrice > maxPrice)) return false;
+    }
     const lastTs = prevLastEvents[market];
-    if (lastTs === undefined) return true;
+    if (lastTs === undefined) return true; // 이벤트 기록 없음 (신규 시드) → 유지
     return lastTs >= poolRemovalCutoff;
   });
 
@@ -390,7 +400,7 @@ console.log(`  → ${path.relative(root, optimizedParamsPath)}`);
 
 // 7. candidateMarkets pool 갱신
 console.log(`\n[anomaly-rollover] Step 7: candidateMarkets pool 갱신`);
-await updateCandidatePool(topMarkets);
+await updateCandidatePool(topMarkets, candlesByMarket);
 
 // 8. 롤오버 상태 저장
 await writeJson(rolloverStatusPath, {
