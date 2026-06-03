@@ -544,17 +544,24 @@ function buildOptimizationPlan(
     const candles = slicedBacktracking[market] ?? [];
     const optimized = perCoinParams[market]?.[v.slotId];
 
+    // 백트래킹 캔들이 60개 미만이면 신뢰할 백테스트가 불가능.
+    // 이 마켓은 fallback도 쓰지 않고 returnRate = -Infinity로 최하위 랭킹 처리한다.
+    // (캔들 없는 마켓이 returnRate=0%로 실제 이상 코인보다 높게 랭킹되는 버그 방지)
+    const hasBacktrackingData = candles.length >= 60;
+
     // Always try to run a real backtest to get accurate trades/equityCurve/profitFactor.
     let btResult: BacktestResult | null = null;
-    if (candles.length >= 60) {
+    if (hasBacktrackingData) {
       try {
         btResult = runBacktest(v.strategy, v.scenario, candles, config);
       } catch (e) {
         console.warn(`[backtest] ${market} ${v.slotId} ${guideRuleMode}: ${String((e as any)?.message ?? e).slice(0, 120)}`);
       }
     }
-    // Fallback: use cached optimized stats when backtest is not possible
-    if (!btResult && optimized) {
+    // Fallback: use cached optimized stats ONLY when market has backtracking data.
+    // No-data markets must NOT use this fallback — their returnRate would be 0%
+    // which ranks higher than real (negative) results and pollutes the selection.
+    if (!btResult && optimized && hasBacktrackingData) {
       btResult = {
         strategyId: v.slotId,
         scenarioId: v.scenarioId,
@@ -580,30 +587,39 @@ function buildOptimizationPlan(
       : sumRecentQuoteValue(candles, TRADE_VALUE_LOOKBACK_CANDLES);
 
     const cycleScore = computeCycleScore(lastEvents[market], Date.now());
+
+    // 백트래킹 데이터 없는 마켓은 returnRate = -Infinity로 최하위 랭킹.
+    const fallbackReturnRate = hasBacktrackingData ? 0 : -Infinity;
+
     return {
       market,
       candidateRank: idx + 1,
       tradeValue: quoteVol,
-      score: (btResult?.returnRate ?? -1) + Math.min((btResult?.tradeCount ?? 0) / 1000, 0.02),
+      score: (btResult?.returnRate ?? fallbackReturnRate) + Math.min((btResult?.tradeCount ?? 0) / 1000, 0.02),
       cycleScore,
       bestResult: btResult ?? {
         strategyId: v.slotId, scenarioId: v.scenarioId, scenarioName: v.scenarioLabel,
-        market, finalValue: 1_000_000, returnRate: 0, maxDrawdown: 0, winRate: 0,
+        market, finalValue: 1_000_000, returnRate: fallbackReturnRate, maxDrawdown: 0, winRate: 0,
         tradeCount: 0, profitFactor: 1, worstTradeReturn: 0,
         guideRuleMode, guideRejectedSignals: 0, trades: [], signalAudit: [], equityCurve: [],
       },
     };
   });
 
-  // Primary sort: cycleScore (21-45 days since last event = prime window = 1.0)
-  // Secondary: backtest returnRate (within same cycle tier, pick best performer)
-  // Tertiary: tradeValue (liquidity tiebreaker)
-  optimizedMarkets.sort((a, b) =>
-    (b.cycleScore ?? 0.5) - (a.cycleScore ?? 0.5) ||
-    b.bestResult.returnRate - a.bestResult.returnRate ||
-    b.score - a.score ||
-    b.tradeValue - a.tradeValue,
-  );
+  // Ranking priority:
+  //   1. 백트래킹 데이터 유무 — 데이터 없는 마켓은 항상 최하위 (빈 슬롯 채우기 용도)
+  //   2. cycleScore — 21-45일 전 이벤트 = prime window (1.0)
+  //   3. returnRate — 같은 cycleScore tier 내에서 성과 기준 정렬
+  //   4. tradeValue — 유동성 tie-breaker
+  optimizedMarkets.sort((a, b) => {
+    const aHasData = (slicedBacktracking[a.market]?.length ?? 0) >= 60 ? 1 : 0;
+    const bHasData = (slicedBacktracking[b.market]?.length ?? 0) >= 60 ? 1 : 0;
+    if (aHasData !== bHasData) return bHasData - aHasData; // 데이터 있는 마켓 우선
+    return (b.cycleScore ?? 0.5) - (a.cycleScore ?? 0.5) ||
+      b.bestResult.returnRate - a.bestResult.returnRate ||
+      b.score - a.score ||
+      b.tradeValue - a.tradeValue;
+  });
 
   return {
     strategyId: v.slotId,
@@ -896,11 +912,22 @@ async function runCycle() {
     // Union: previous pool ∪ newly detected (no duplicates)
     const poolSet = new Set<string>([...previousPool, ...detectedAnomalyMarkets.map(m => m.market)]);
 
-    // Remove markets with no event recorded in last POOL_REMOVAL_DAYS days
+    // 가격 범위(CANDIDATE_MIN_PRICE ~ CANDIDATE_MAX_PRICE) 벗어난 코인 제거
+    const lastPriceByMarket: Record<string, number> = {};
+    for (const market of [...poolSet]) {
+      const p = (backtracking1m[market] ?? []).at(-1)?.close ?? 0;
+      if (p > 0) lastPriceByMarket[market] = p;
+    }
+
+    // Remove: 가격 범위 초과 OR 이벤트 없이 POOL_REMOVAL_DAYS 초과
     const poolRemovalCutoff = Date.now() - POOL_REMOVAL_DAYS * MS_DAY;
     const retained = [...poolSet].filter(market => {
+      const price = lastPriceByMarket[market];
+      if (price !== undefined && (price < CANDIDATE_MIN_PRICE || price > CANDIDATE_MAX_PRICE)) {
+        return false; // 가격 범위 초과 → 즉시 제거
+      }
       const lastTs = mergedLastEvents[market];
-      if (lastTs === undefined) return true; // no record yet → keep (newly seeded)
+      if (lastTs === undefined) return true; // 이벤트 기록 없음 → 유지 (신규 시드)
       return lastTs >= poolRemovalCutoff;
     });
 

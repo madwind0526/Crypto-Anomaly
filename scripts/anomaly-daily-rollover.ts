@@ -107,13 +107,24 @@ interface UpbitTicker {
 
 interface UpbitCandle {
   market: string;
-  timestamp: number;
+  timestamp: number;                  // 마지막 체결 시각 (분 경계 아님 — 직접 쓰지 말 것)
+  candle_date_time_utc?: string;      // 분봉 시작 시각 ("2026-06-03T12:24:00")
   opening_price: number;
   high_price: number;
   low_price: number;
   trade_price: number;
   candle_acc_trade_volume: number;
   candle_acc_trade_price: number;
+}
+
+/** 분봉 시작 시각(ms). candle_date_time_utc 우선, 없으면 timestamp를 1분 경계로 내림. */
+function candleStartMs(c: UpbitCandle): number {
+  if (typeof c.candle_date_time_utc === "string") {
+    const utc = c.candle_date_time_utc;
+    const parsed = Date.parse(utc.endsWith("Z") ? utc : `${utc}Z`);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Math.floor(c.timestamp / 60_000) * 60_000;
 }
 
 async function fetchJson<T>(pathname: string): Promise<T> {
@@ -184,9 +195,11 @@ async function fetchCandlesForWindow(market: string, start: number, end: number)
 
   const byTs = new Map<number, import("../src/types/trading").Candle>();
   for (const c of all) {
-    if (c.timestamp < start || c.timestamp >= end) continue;
-    byTs.set(c.timestamp, {
-      market: c.market, timestamp: c.timestamp,
+    // 윈도우 필터/dedup 은 분 경계로 정규화한 시각 기준
+    const ts = candleStartMs(c);
+    if (ts < start || ts >= end) continue;
+    byTs.set(ts, {
+      market: c.market, timestamp: ts,
       open: c.opening_price, high: c.high_price, low: c.low_price, close: c.trade_price,
       volume: c.candle_acc_trade_volume, quoteVolume: c.candle_acc_trade_price,
     });

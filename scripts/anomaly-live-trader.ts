@@ -23,9 +23,10 @@
  */
 
 import WebSocket from "ws";
-import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { cancelOrder, getAccounts, getKrwBalance, getOrder, placeMarketBuy, placeMarketSell } from "./upbitOrder";
+import { fetchTickers } from "../src/data/upbitClient";
 import { sma, rateOfChange } from "../src/indicators/technical";
 import { anomalyStrategy, anomalyScenario } from "../src/strategies/anomaly";
 import type { Candle, StrategyContext, StrategyDecision, StrategyScenario, TraderId } from "../src/types/trading";
@@ -378,8 +379,28 @@ async function selectBestStrategy(): Promise<{ id: TraderId; name: string }> {
 }
 
 // ── 초기화 ───────────────────────────────────────────────────────────────────
+/**
+ * 비정상 종료(SIGKILL) 시 write→rename 사이에 남은 .tmp 파일을 청소.
+ * state/status 파일과 같은 디렉터리의 *.tmp 를 제거한다.
+ */
+async function cleanupStaleTmpFiles() {
+  const dirs = [path.dirname(statePath), path.dirname(publicStatusPath)];
+  const targets = [path.basename(statePath), path.basename(publicStatusPath)];
+  for (const dir of new Set(dirs)) {
+    let entries: string[] = [];
+    try { entries = await readdir(dir); } catch { continue; }
+    for (const name of entries) {
+      // "<basename>.<pid>.<ts>.tmp" 패턴만 제거
+      if (!name.endsWith(".tmp")) continue;
+      if (!targets.some(t => name.startsWith(`${t}.`))) continue;
+      await unlink(path.join(dir, name)).catch(() => {});
+    }
+  }
+}
+
 async function init() {
   await acquireProcessLock();
+  await cleanupStaleTmpFiles();
 
   if (DRY_RUN) {
     console.log("[live-trader] ⚠️  DRY RUN 모드 — 실제 주문 없음");
@@ -425,13 +446,28 @@ async function init() {
   }
 
   // startSnapshot: 최초 기동 시에만 설정 (재시작해도 유지)
+  // API 키 있으면 실제 Upbit 총 보유자산을 시작 잔고로 사용
   if (!state.startSnapshot) {
-    state.startSnapshot = buildPortfolioSnapshot();
+    invalidateBalanceCache();                        // 최신 잔고 강제 조회
+    const realBalance = await computeBalance();
+    state.startSnapshot = {
+      krwCash:    realBalance.krwCash,
+      invested:   realBalance.invested,
+      coinValue:  realBalance.coinValue,
+      totalValue: realBalance.totalValue,
+      pnl:        realBalance.coinValue - realBalance.invested,
+      at:         new Date().toISOString(),
+    };
     state.startBalance = state.startSnapshot.totalValue;
     await saveState(state);
+    const isRealBalance = ACCESS_KEY && SECRET_KEY && state.startSnapshot.krwCash > 0;
+    console.log(`[live-trader] 시작 잔고 캡처: ${Math.floor(state.startBalance).toLocaleString()}원` +
+      (isRealBalance ? " (Upbit 실잔고)" : " (시뮬레이션)"));
   } else if (!state.startBalance) {
     state.startBalance = state.startSnapshot.totalValue;
     await saveState(state);
+  } else {
+    console.log(`[live-trader] 시작 잔고 유지: ${Math.floor(state.startBalance).toLocaleString()}원`);
   }
   statusPublishingEnabled = true;
   console.log(`[live-trader] 시작 잔고: ${Math.floor(state.startBalance).toLocaleString()}원 | 포지션: ${Object.keys(state.positions).length}개`);
@@ -483,10 +519,15 @@ async function loadState(): Promise<LiveState> {
 async function saveState(s: LiveState): Promise<void> {
   const snapshot = JSON.stringify(s, null, 2);
   await (saveChain = saveChain.catch(() => {}).then(async () => {
-    await mkdir(path.dirname(statePath), { recursive: true });
     const tmp = `${statePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tmp, snapshot, "utf8");
-    await rename(tmp, statePath);
+    try {
+      await mkdir(path.dirname(statePath), { recursive: true });
+      await writeFile(tmp, snapshot, "utf8");
+      await rename(tmp, statePath);
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      console.warn("[live-trader] state 저장 실패:", String(e).slice(0, 80));
+    }
     await writePublicStatus();
   }));
 }
@@ -503,21 +544,83 @@ function buildPortfolioSnapshot(): PortfolioSnapshot {
   };
 }
 
-async function computeBalance() {
-  if (DRY_RUN) {
-    const snapshot = buildPortfolioSnapshot();
-    return { krwCash: snapshot.krwCash, invested: snapshot.invested, coinValue: snapshot.coinValue, totalValue: snapshot.totalValue };
+// 잔고 캐시 — Upbit API 과다 호출 방지 (30초 TTL)
+let _balanceCache: { data: ReturnType<typeof buildPortfolioSnapshot>; at: number } | null = null;
+const BALANCE_TTL_MS = 30_000;
+
+function invalidateBalanceCache() { _balanceCache = null; }
+
+/**
+ * 잔고 조회:
+ *   API 키 있음 → Upbit 실제 잔고 (DRY RUN 포함) — 시작잔고·보유현금·매입가·평가가치 모두 실제값
+ *   API 키 없음 → krwBalance 기반 시뮬레이션 값
+ */
+async function computeBalance(): Promise<{ krwCash: number; invested: number; coinValue: number; totalValue: number }> {
+  const now = Date.now();
+
+  // 캐시 유효하면 그대로 반환
+  if (_balanceCache && now - _balanceCache.at < BALANCE_TTL_MS) {
+    const d = _balanceCache.data;
+    return { krwCash: d.krwCash, invested: d.invested, coinValue: d.coinValue, totalValue: d.totalValue };
   }
-  try {
-    const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
-    const krw = accounts.find(a => a.currency === "KRW");
-    const krwCash = krw ? parseFloat(krw.balance) + parseFloat(krw.locked) : 0;
-    const coinValue = Object.values(state.positions)
-      .reduce((s, p) => s + parseFloat(p.quantity) * getLatestPrice(p.market, p.avgBuyPrice), 0);
-    return { krwCash, invested: 0, coinValue, totalValue: krwCash + coinValue };
-  } catch {
-    return { krwCash: 0, invested: 0, coinValue: 0, totalValue: 0 };
+
+  // Upbit 실잔고 (API 키가 있는 경우 — dry-run 포함)
+  if (ACCESS_KEY && SECRET_KEY) {
+    try {
+      const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
+
+      // 보유 현금 (KRW 가용 + 주문 잠금)
+      const krwAccount = accounts.find(a => a.currency === "KRW");
+      const krwCash = krwAccount
+        ? parseFloat(krwAccount.balance) + parseFloat(krwAccount.locked)
+        : 0;
+
+      // 코인 계좌 목록 (KRW 제외, 잔고 > 0)
+      const coinAccounts = accounts.filter(a => {
+        if (a.currency === "KRW") return false;
+        return parseFloat(a.balance) + parseFloat(a.locked) > 0;
+      });
+
+      // 총 매수 = Σ (qty × avg_buy_price)  ← Upbit "총 매수" 그대로
+      let invested = 0;
+      for (const a of coinAccounts) {
+        const qty    = parseFloat(a.balance) + parseFloat(a.locked);
+        const avgBuy = parseFloat(a.avg_buy_price);
+        invested += qty * avgBuy;
+      }
+
+      // 총 평가 = Σ (qty × 현재가)  ← Upbit 티커 API "총 평가" 그대로
+      // KRW 마켓이 없는 코인(예: GAS)은 fetchTickers가 404를 반환할 수 있으므로
+      // 개별 실패를 무시하고 WebSocket 가격으로 fallback
+      let coinValue = 0;
+      if (coinAccounts.length > 0) {
+        const markets = coinAccounts.map(a => `KRW-${a.currency}`);
+        let priceMap = new Map<string, number>();
+        try {
+          const tickers = await fetchTickers(markets);
+          priceMap = new Map(tickers.map(t => [t.market, t.tradePrice]));
+        } catch {
+          // KRW 마켓 없는 코인 포함 시 404 — WebSocket 가격으로 대체
+        }
+        for (const a of coinAccounts) {
+          const qty    = parseFloat(a.balance) + parseFloat(a.locked);
+          const market = `KRW-${a.currency}`;
+          const price  = priceMap.get(market) ?? getLatestPrice(market, parseFloat(a.avg_buy_price));
+          coinValue += qty * price;
+        }
+      }
+
+      const result = { krwCash, invested, coinValue, totalValue: krwCash + coinValue };
+      _balanceCache = { data: { ...result, pnl: coinValue - invested, at: new Date().toISOString() }, at: now };
+      return result;
+    } catch (e) {
+      console.warn("[live-trader] Upbit 잔고 조회 실패, 시뮬레이션 값 사용:", String(e).slice(0, 80));
+    }
   }
+
+  // Fallback: krwBalance 기반 시뮬레이션
+  const snapshot = buildPortfolioSnapshot();
+  return { krwCash: snapshot.krwCash, invested: snapshot.invested, coinValue: snapshot.coinValue, totalValue: snapshot.totalValue };
 }
 
 function getLatestPrice(market: string, fallback: number): number {
@@ -604,12 +707,16 @@ async function writePublicStatus() {
     balance, startBalance: state?.startBalance,
     startSnapshot: state?.startSnapshot,
   };
+  const tmp = `${publicStatusPath}.${process.pid}.${Date.now()}.tmp`;
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
-    const tmp = `${publicStatusPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, JSON.stringify(payload), "utf8");
     await rename(tmp, publicStatusPath);
-  } catch { /* ignore */ }
+  } catch (e) {
+    // rename 실패 시 잔여 tmp 정리 (다음 cleanupStaleTmpFiles 백업도 있음)
+    await unlink(tmp).catch(() => {});
+    console.warn("[live-trader] status 파일 쓰기 실패:", String(e).slice(0, 80));
+  }
 }
 
 // ── Process lock ──────────────────────────────────────────────────────────────
@@ -776,6 +883,7 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
       const qty = (ORDER_AMOUNT * (1 - FEE)) / price;
       state.krwBalance = Math.max(0, state.krwBalance - ORDER_AMOUNT);
       state.positions[market] = { market, quantity: qty.toFixed(8), avgBuyPrice: price, entryAt: new Date().toISOString(), orderUuid: "dry-run", highestPrice: price };
+      invalidateBalanceCache();                      // 체결 후 잔고 캐시 갱신
       const portfolioAfter = buildPortfolioSnapshot();
       state.trades.push({ at: new Date().toISOString(), market, side: "buy", amount: ORDER_AMOUNT, price, netKrw: ORDER_AMOUNT, portfolioAfter, dryRun: true, reasonCodes });
       await saveState(state);
@@ -842,6 +950,7 @@ async function executeSell(market: string, position: LivePosition, price: number
       const candleTs = closedCandles[market]?.at(-1)?.timestamp;
       if (candleTs) state.lastSellAt[market] = candleTs;
       delete state.positions[market];
+      invalidateBalanceCache();                      // 체결 후 잔고 캐시 갱신
       const portfolioAfter = buildPortfolioSnapshot();
       state.trades.push({ at: new Date().toISOString(), market, side: "sell", amount: qty, price, netKrw, pnlKrw, portfolioAfter, dryRun: true, reasonCodes });
       await saveState(state);

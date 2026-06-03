@@ -91,7 +91,11 @@ async function main() {
       )
       .map((candle) => ({
         market: candle.market,
-        timestamp: candle.timestamp,
+        // candle.timestamp 은 "마지막 체결 시각"(분 경계 아님)이므로 사용 금지.
+        // candle_date_time_utc(분봉 시작 시각)을 파싱해 분 경계 timestamp로 정규화한다.
+        // 이게 어긋나면 1m 시뮬레이터가 같은 분봉을 서로 다른 캔들로 인식해
+        // 같은 분 안에서 매수→손절→재매수가 반복되는 over-trading 버그가 발생한다.
+        timestamp: candleStartMs(candle),
         open: candle.opening_price,
         high: candle.high_price,
         low: candle.low_price,
@@ -130,6 +134,22 @@ async function main() {
   } else {
     console.log(`Skipped public cache for ${path.relative(ROOT, PUBLIC_MARKET_CACHE_PATH)}`);
   }
+}
+
+/**
+ * 분봉 시작 시각(ms)을 반환한다.
+ * candle_date_time_utc("2026-06-03T12:24:00", 분 경계, Z 없음)을 우선 사용하고,
+ * 없을 때만 candle.timestamp(마지막 체결 시각)를 UNIT 분 경계로 내림(floor)한다.
+ */
+function candleStartMs(candle) {
+  const utc = candle.candle_date_time_utc;
+  if (typeof utc === "string") {
+    const parsed = Date.parse(utc.endsWith("Z") ? utc : `${utc}Z`);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  // fallback: 체결 시각을 UNIT 분 단위로 내림
+  const unitMs = UNIT * 60_000;
+  return Math.floor(candle.timestamp / unitMs) * unitMs;
 }
 
 async function fetchCandles(market) {

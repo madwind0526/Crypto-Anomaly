@@ -76,6 +76,9 @@ export function runPaperTradingSimulation(
   let cash = resolved.config.initialCash;
   let position: Position | null = null;
   let lastPositionCandleTimestamp: number | null = null;
+  // 마켓별 마지막 청산 캔들 timestamp — 같은 캔들 내 재진입(over-trading) 방지.
+  // backtest.ts가 risk-exit 후 그 캔들 신호를 skip하는 것과 동일한 효과.
+  const lastExitCandleTs = new Map<string, number>();
   const trades: Trade[] = [];
   const decisions: PaperTradingDecisionLog[] = [];
   const equityCurve: Array<{ timestamp: number; value: number }> = [];
@@ -136,6 +139,7 @@ export function runPaperTradingSimulation(
             exitReason = "stop-loss";
           }
           cash += closePosition(pos, exitPrice * (1 - resolved.config.slippageRate), timestamp, ["risk-rule-exit", exitReason]);
+          lastExitCandleTs.set(pos.market, candle.timestamp); // 같은 캔들 재진입 차단
           position = null;
           lastPositionCandleTimestamp = null;
           const riskPortfolioValue = getPortfolioValue(cash, null, candlesAtTime);
@@ -163,6 +167,14 @@ export function runPaperTradingSimulation(
         },
         scenario,
       );
+      // 같은 캔들에서 risk-exit 후 재진입 차단 (over-trading 방지).
+      // backtest.ts의 "skip strategy decision for this candle"와 동일.
+      if (
+        decision.action === "buy" &&
+        lastExitCandleTs.get(selected.market) === candleInfo.candle.timestamp
+      ) {
+        continue;
+      }
       const guideRuleEvaluation = evaluateGuideRules({
         candles,
         candleIndex,
@@ -232,6 +244,7 @@ export function runPaperTradingSimulation(
       if (candle) {
         const sellSlip = resolved.config.dynamicSlippage ? resolved.config.dynamicSlippage(candle.close) : resolved.config.slippageRate;
         cash += closePosition(position, candle.close * (1 - sellSlip), timestamp, decision.reasonCodes);
+        lastExitCandleTs.set(position.market, candle.timestamp); // 같은 캔들 재진입 차단
         position = null;
         lastPositionCandleTimestamp = null;
       }
