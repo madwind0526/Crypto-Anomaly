@@ -15,7 +15,7 @@ await build({
   outfile,
   platform: "node",
   target: "node20",
-  packages: "bundle",
+  packages: "external",  // ws uses CJS require() — must stay external
 });
 
 try {
