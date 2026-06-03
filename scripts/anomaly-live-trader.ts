@@ -6,7 +6,7 @@
  *   UPBIT_SECRET_KEY=<secret>
  *   LIVE_TRADING_ENABLED=true        (실제 주문을 보내려면 반드시 필요)
  *   LIVE_BUDGET=5000000              (총 운용금액, 기본 5,000,000원)
- *   LIVE_MAX_POSITIONS=9             (최대 동시 포지션 수, 기본 9)
+ *   LIVE_MAX_POSITIONS=15            (최대 동시 포지션 수, 기본 15)
  *   MAX_DAILY_LOSS_KRW=500000        (일일 최대 손실, 기본 total*10%)
  *
  * 실행:
@@ -41,7 +41,7 @@ const LIVE_ENABLED  = process.env.LIVE_TRADING_ENABLED === "true";
 const DRY_RUN       = process.argv.includes("--dry-run") || !ACCESS_KEY || !SECRET_KEY || !LIVE_ENABLED;
 
 const TOTAL_BUDGET      = Number(process.env.LIVE_BUDGET            ?? 5_000_000);
-const MAX_POSITIONS     = Number(process.env.LIVE_MAX_POSITIONS      ?? 9);
+const MAX_POSITIONS     = Number(process.env.LIVE_MAX_POSITIONS      ?? 15);
 const BUDGET_PER_COIN   = Math.floor(TOTAL_BUDGET / MAX_POSITIONS);
 const ORDER_AMOUNT      = Math.floor(BUDGET_PER_COIN * 0.95);   // 5% 슬리피지·수수료 여유
 const MIN_ORDER_KRW     = 5_500;
@@ -388,7 +388,7 @@ async function init() {
   selectedMarkets = Array.isArray(selection.markets)
     ? selection.markets.map((m: any) => m.market).filter((m: unknown) => typeof m === "string")
     : Array.isArray(selection.candidateMarkets)
-      ? selection.candidateMarkets.slice(0, 9)
+      ? selection.candidateMarkets.slice(0, MAX_POSITIONS)
       : [];
   if (selectedMarkets.length === 0) throw new Error("anomaly-selection.json에 markets가 없습니다.");
 

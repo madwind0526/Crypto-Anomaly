@@ -77,7 +77,7 @@ const CANDIDATE_MARKET_COUNT = Number(process.env.ANOMALY_CANDIDATE_MARKET_COUNT
 // 가격 필터: 실매매 대상과 동일 범위로 제한 (fetch-upbit-market-data와 동일 기본값)
 const CANDIDATE_MIN_PRICE = Number(process.env.UPBIT_MIN_PRICE ?? 100);
 const CANDIDATE_MAX_PRICE = Number(process.env.UPBIT_MAX_PRICE ?? 10_000);
-const MONITORING_MARKET_COUNT = Number(process.env.ANOMALY_MONITORING_MARKET_COUNT ?? 9);
+const MONITORING_MARKET_COUNT = Number(process.env.ANOMALY_MONITORING_MARKET_COUNT ?? 15);
 const TRADE_VALUE_LOOKBACK_CANDLES = Number(process.env.ANOMALY_TRADE_VALUE_LOOKBACK_CANDLES ?? 1440);
 const REFIT_PREVIOUS_WEIGHT = clamp(Number(process.env.ANOMALY_REFIT_PREVIOUS_WEIGHT ?? 0.7), 0, 1);
 const REFIT_MIN_COMPLETENESS_RATIO = Number(process.env.ANOMALY_REFIT_MIN_COMPLETENESS_RATIO ?? 0.7);
