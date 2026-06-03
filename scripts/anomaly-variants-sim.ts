@@ -40,7 +40,7 @@ import { runOptimization, type OptimizedParams } from "./optimize-params";
 const execAsync = promisify(exec);
 import path from "node:path";
 import { runPaperTradingSimulation } from "../src/simulation/paperTrading";
-import { runBacktest, defaultBacktestConfig } from "../src/simulation/backtest";
+import { runBacktest, defaultBacktestConfig, upbitTickSlippage } from "../src/simulation/backtest";
 import { anomalyScenario, anomalyStrategy } from "../src/strategies/anomaly";
 import { sma, rateOfChange } from "../src/indicators/technical";
 import type {
@@ -517,6 +517,13 @@ function computeCycleScore(lastEventTs: number | undefined, now: number): number
 }
 
 // ─── optimization plan builder ────────────────────────────────────────────────
+/** Upbit tick-slippage based realistic backtest config (shared across variants). */
+const realisticBacktestConfig = {
+  ...defaultBacktestConfig,
+  slippageRate: 0,
+  dynamicSlippage: upbitTickSlippage,
+};
+
 function buildOptimizationPlan(
   v:                  Variant,
   guideRuleMode:      GuideRuleMode,
@@ -526,7 +533,7 @@ function buildOptimizationPlan(
   markets:            string[],
   lastEvents:         Record<string, number> = {},
 ): TraderOptimizationPlan {
-  const config = { ...defaultBacktestConfig, guideRuleMode };
+  const config = { ...realisticBacktestConfig, guideRuleMode };
 
   const optimizedMarkets: MarketScenarioOptimization[] = markets.map((market, idx) => {
     // Use pre-sliced candles so the same Candle[] reference is shared across all
@@ -1044,6 +1051,7 @@ async function runCycle() {
           guideRuleMode,
           autoBlockMode,
           maxCandles: totalTimestamps + 1,
+          config: realisticBacktestConfig,
         });
 
         caseResults[guideRuleMode][autoBlockMode][v.slotId] = result;

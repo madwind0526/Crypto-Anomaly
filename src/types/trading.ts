@@ -113,6 +113,8 @@ export interface BacktestConfig {
   initialCash: number;
   feeRate: number;
   slippageRate: number;
+  /** When provided, overrides slippageRate with a price-based tick slippage model. */
+  dynamicSlippage?: (price: number) => number;
   guideRuleMode?: GuideRuleMode;
   autoBlockMode?: SafetyMode;
 }

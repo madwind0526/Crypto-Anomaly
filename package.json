@@ -5,27 +5,31 @@
     "type":  "module",
     "scripts":  {
                     "dev":  "vite --host 127.0.0.1",
-                    "build":  "tsc \u0026\u0026 vite build",
+                    "build":  "tsc && vite build",
                     "preview":  "vite preview --host 127.0.0.1",
                     "fetch:hist5m":  "node scripts/fetch-hist5m.mjs",
                     "fetch:anomaly:1m":  "node scripts/fetch-anomaly-1m.mjs",
                     "sim:anomaly":  "node scripts/anomaly-variants-sim.mjs",
                     "sim:anomaly:loop":  "node scripts/anomaly-variants-sim.mjs --loop=60000",
                     "sim:anomaly:watchdog":  "node scripts/anomaly-watchdog.mjs",
+                    "live:dry":  "node --env-file=.env scripts/anomaly-live-trader.mjs --dry-run",
+                    "live":  "node --env-file=.env scripts/anomaly-live-trader.mjs",
                     "test":  "vitest run",
                     "ws:live":  "node scripts/ws-live.mjs",
-                    "fetch:anomaly:1m:backtracking":  "set UPBIT_CANDLE_UNIT=1\u0026\u0026 set UPBIT_LOOKBACK_DAYS=7\u0026\u0026 set UPBIT_CACHE_LABEL=upbit-krw-1m-anomaly-backtracking\u0026\u0026 set UPBIT_WRITE_PUBLIC=false\u0026\u0026 node scripts/fetch-upbit-market-data.mjs"
+                    "fetch:anomaly:1m:backtracking":  "set UPBIT_CANDLE_UNIT=1&& set UPBIT_LOOKBACK_DAYS=7&& set UPBIT_CACHE_LABEL=upbit-krw-1m-anomaly-backtracking&& set UPBIT_WRITE_PUBLIC=false&& node scripts/fetch-upbit-market-data.mjs"
                 },
     "dependencies":  {
                          "@vitejs/plugin-react":  "^4.3.4",
                          "lightweight-charts":  "^5.0.8",
                          "react":  "^18.3.1",
                          "react-dom":  "^18.3.1",
+                         "uuid":  "^11.1.0",
                          "ws":  "^8.20.1"
                      },
     "devDependencies":  {
                             "@types/react":  "^18.3.18",
                             "@types/react-dom":  "^18.3.5",
+                            "@types/uuid":  "^10.0.0",
                             "esbuild":  "^0.24.0",
                             "typescript":  "^5.7.3",
                             "vite":  "^6.0.7",

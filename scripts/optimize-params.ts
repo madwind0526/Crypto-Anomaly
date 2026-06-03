@@ -38,9 +38,19 @@ export interface OptimizedParamsResult {
   params:       OptimizedParams;
 }
 
-// ─── fee / slippage (match defaultBacktestConfig) ─────────────────────────────
-const FEE_RATE      = 0.0005;
-const SLIPPAGE_RATE = 0.0005;
+// ─── fee / slippage ───────────────────────────────────────────────────────────
+const FEE_RATE = 0.0005;
+
+/** Upbit tick-size based one-way slippage (mirrors backtest.ts upbitTickSlippage). */
+function upbitTickSlippage(price: number): number {
+  if (price < 10)     return 0.01  / price;
+  if (price < 100)    return 0.1   / price;
+  if (price < 500)    return 1     / price;
+  if (price < 1_000)  return 5     / price;
+  if (price < 5_000)  return 10    / price;
+  if (price < 10_000) return 50    / price;
+  return 100 / price;
+}
 
 // ─── indicator (mirrors anomaly-variants-sim's getInd) ────────────────────────
 interface Ind {
@@ -66,14 +76,14 @@ function computeInd(candles: Candle[]): Ind {
 interface Pos { entry: number; high: number; hold: number; }
 
 function openPos(price: number): Pos {
-  // Apply entry slippage and fee (mirrors backtest.ts: fee charged on both buy and sell)
-  const fillPrice = price * (1 + SLIPPAGE_RATE);
+  // Apply tick-based slippage and fee (buy at ask = price + 1 tick)
+  const fillPrice = price * (1 + upbitTickSlippage(price));
   return { entry: fillPrice * (1 + FEE_RATE), high: price, hold: 0 };
 }
 
 function closePos(pos: Pos, exitPrice: number, cash: number): number {
-  // Apply exit slippage and fee
-  const netExit = exitPrice * (1 - SLIPPAGE_RATE) * (1 - FEE_RATE);
+  // Apply tick-based slippage and fee (sell at bid = exitPrice - 1 tick)
+  const netExit = exitPrice * (1 - upbitTickSlippage(exitPrice)) * (1 - FEE_RATE);
   return cash * (1 + (netExit - pos.entry) / pos.entry);
 }
 

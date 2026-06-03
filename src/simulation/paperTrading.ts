@@ -230,7 +230,8 @@ export function runPaperTradingSimulation(
     if ((decision.action === "sell" || decision.action === "rotate") && position) {
       const candle = candlesAtTime.get(position.market)?.candle;
       if (candle) {
-        cash += closePosition(position, candle.close * (1 - resolved.config.slippageRate), timestamp, decision.reasonCodes);
+        const sellSlip = resolved.config.dynamicSlippage ? resolved.config.dynamicSlippage(candle.close) : resolved.config.slippageRate;
+        cash += closePosition(position, candle.close * (1 - sellSlip), timestamp, decision.reasonCodes);
         position = null;
         lastPositionCandleTimestamp = null;
       }
@@ -240,7 +241,8 @@ export function runPaperTradingSimulation(
       const candle = candlesAtTime.get(decision.buyMarket)?.candle;
       if (candle && cash > 0) {
         const budget = cash;
-        const fillPrice = candle.close * (1 + resolved.config.slippageRate);
+        const buySlip = resolved.config.dynamicSlippage ? resolved.config.dynamicSlippage(candle.close) : resolved.config.slippageRate;
+        const fillPrice = candle.close * (1 + buySlip);
         const fee = budget * resolved.config.feeRate;
         const quantity = Math.max(0, (budget - fee) / fillPrice);
         if (quantity > 0) {
@@ -287,7 +289,8 @@ export function runPaperTradingSimulation(
     const candles = candlesByMarket[position.market] ?? [];
     const last = candles[marketPointers.get(position.market) ?? candles.length - 1] ?? candles[candles.length - 1];
     if (last) {
-      cash += closePosition(position, last.close * (1 - resolved.config.slippageRate), last.timestamp, ["paper-final-close"]);
+      const finalSlip = resolved.config.dynamicSlippage ? resolved.config.dynamicSlippage(last.close) : resolved.config.slippageRate;
+      cash += closePosition(position, last.close * (1 - finalSlip), last.timestamp, ["paper-final-close"]);
       position = null;
       lastPositionCandleTimestamp = null;
       equityCurve.push({ timestamp: last.timestamp, value: cash });

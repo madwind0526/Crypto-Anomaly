@@ -18,6 +18,21 @@ export const defaultBacktestConfig: BacktestConfig = {
   slippageRate: 0.0005,
 };
 
+/**
+ * Upbit tick-size based one-way slippage (market order fills at best ask/bid).
+ * Use with BacktestConfig.dynamicSlippage for realistic simulation.
+ * Round-trip cost ≈ 2 ticks / price + 2 × feeRate.
+ */
+export function upbitTickSlippage(price: number): number {
+  if (price < 10)     return 0.01  / price;
+  if (price < 100)    return 0.1   / price;
+  if (price < 500)    return 1     / price;
+  if (price < 1_000)  return 5     / price;
+  if (price < 5_000)  return 10    / price;
+  if (price < 10_000) return 50    / price;
+  return 100 / price;
+}
+
 export function runBacktest(
   strategy: Strategy,
   scenario: StrategyScenario,
@@ -115,7 +130,8 @@ export function runBacktest(
 
     if (finalAction === "buy" && !position && decision.targetWeight > 0) {
       const budget = cash * Math.min(decision.targetWeight, 1);
-      const fillPrice = candle.close * (1 + config.slippageRate);
+      const buySlip = config.dynamicSlippage ? config.dynamicSlippage(candle.close) : config.slippageRate;
+      const fillPrice = candle.close * (1 + buySlip);
       const fee = budget * config.feeRate;
       const quantity = Math.max(0, (budget - fee) / fillPrice);
 
@@ -145,7 +161,7 @@ export function runBacktest(
 
     if (finalAction === "sell" && position) {
       const roundTripReturn = closePosition(
-        candle.close * (1 - config.slippageRate),
+        candle.close * (1 - (config.dynamicSlippage ? config.dynamicSlippage(candle.close) : config.slippageRate)),
         [...decision.reasonCodes, ...guideRuleEvaluation.reasons],
         candle.timestamp,
         guideRuleEvaluation,
@@ -161,7 +177,7 @@ export function runBacktest(
 
   if (position) {
     const last = candles[candles.length - 1];
-    const roundTripReturn = closePosition(last.close * (1 - config.slippageRate), ["final-close"], last.timestamp);
+    const roundTripReturn = closePosition(last.close * (1 - (config.dynamicSlippage ? config.dynamicSlippage(last.close) : config.slippageRate)), ["final-close"], last.timestamp);
     roundTripReturns.push(roundTripReturn);
     equityCurve.push({ timestamp: last.timestamp, value: cash });
   }
