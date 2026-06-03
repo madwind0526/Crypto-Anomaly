@@ -64,32 +64,39 @@ interface LivePosition {
   highestPrice: number;
 }
 
+interface LivePortfolioSnapshot {
+  krwCash: number; invested: number; coinValue: number;
+  totalValue: number; pnl: number; at: string;
+}
+
 interface LiveTradeLog {
-  at:          string;
-  market:      string;
-  side:        "buy" | "sell";
-  amount:      number;
-  price:       number;
-  actualPrice?: number;
-  netKrw?:     number;
-  pnlKrw?:     number;
-  dryRun:      boolean;
-  reasonCodes: string[];
+  at:              string;
+  market:          string;
+  side:            "buy" | "sell";
+  amount:          number;
+  price:           number;
+  actualPrice?:    number;
+  netKrw?:         number;
+  pnlKrw?:         number;
+  portfolioAfter?: LivePortfolioSnapshot;
+  dryRun:          boolean;
+  reasonCodes:     string[];
 }
 
 interface LiveTradeStatus {
-  updatedAt:    string;
-  mode:         "dry-run" | "live";
-  strategyId:   string;
-  strategyName: string;
-  totalBudget:  number;
-  budgetPerCoin: number;
-  orderAmount:  number;
+  updatedAt:       string;
+  mode:            "dry-run" | "live";
+  strategyId:      string;
+  strategyName:    string;
+  totalBudget:     number;
+  budgetPerCoin:   number;
+  orderAmount:     number;
   selectedMarkets: string[];
-  positions:    Record<string, LivePosition>;
-  trades:       LiveTradeLog[];
-  balance:      { krwCash: number; invested: number; coinValue: number; totalValue: number };
-  startBalance?: number;
+  positions:       Record<string, LivePosition>;
+  trades:          LiveTradeLog[];
+  balance:         { krwCash: number; invested: number; coinValue: number; totalValue: number };
+  startBalance?:   number;
+  startSnapshot?:  LivePortfolioSnapshot;
 }
 
 type PopupState =
@@ -2650,189 +2657,214 @@ function shortStrategyName(id: TraderId) {
 }
 
 // ─── Live Trade View ──────────────────────────────────────────────────────────
+const liveKrwFmt = (v: number) => `${v < 0 ? "-" : ""}₩${Math.abs(Math.round(v)).toLocaleString("ko-KR")}`;
+const liveTimeFmt = (iso: string) =>
+  new Date(iso).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Seoul" });
+
+function LiveTile({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div style={{ background: "var(--surface-raised, #1e2533)", borderRadius: 8, padding: "16px 20px", minWidth: 0 }}>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: color ?? "var(--text)" }}>{value}</div>
+    </div>
+  );
+}
+
 function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
   if (!status) {
     return (
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>Live Trading</h3>
-            <p>anomaly-live-trader가 실행되지 않았거나 상태 파일이 없습니다.</p>
-          </div>
-          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>연결 안됨</span>
-        </div>
-        <div className="empty-state" style={{ marginTop: "24px" }}>
-          <p>npm run live:dry 또는 npm run live 실행 후 대기 중...</p>
-        </div>
+      <section className="panel" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <p className="eyebrow">Live Trade</p>
+        <h3>live-trader가 실행 중이 아닙니다</h3>
+        <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 8 }}>
+          터미널에서 <code>npm run live:dry</code> 를 실행하면 여기에 실시간 현황이 표시됩니다.
+        </p>
       </section>
     );
   }
 
-  const positions = Object.values(status.positions);
-  const isDryRun = status.mode === "dry-run";
-  const pnl = status.startBalance != null ? status.balance.totalValue - status.startBalance : null;
-  const pnlPct = pnl != null && status.startBalance ? pnl / status.startBalance : null;
+  const positions    = Object.values(status.positions);
+  const isDryRun     = status.mode === "dry-run";
+  const startBalance = status.startBalance ?? status.totalBudget;
+  const currentTotal = status.balance.totalValue;
+  const pnl          = currentTotal - startBalance;
+  const pnlPct       = startBalance > 0 ? pnl / startBalance : 0;
+  const pnlColor     = pnl >= 0 ? "#4ade80" : "#f87171";
+  const isStale      = Date.now() - new Date(status.updatedAt).getTime() > 60_000;
 
-  // 최근 90건 거래 내역 (최신순)
-  const recentTrades = status.trades.slice().reverse().slice(0, 90);
+  const oneDayAgo    = Date.now() - 86_400_000;
+  const recentTrades = status.trades
+    .map((t, i) => ({ ...t, idx: i }))
+    .filter(t => new Date(t.at).getTime() >= oneDayAgo)
+    .slice(-90)
+    .reverse();
+
+  const buyCount  = status.trades.filter(t => t.side === "buy").length;
+  const sellCount = status.trades.filter(t => t.side === "sell").length;
 
   return (
-    <>
-      {/* 상단 KPI */}
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>
-              Live Trading
-              <span style={{
-                marginLeft: "10px",
-                fontSize: "0.72rem",
-                padding: "2px 8px",
-                borderRadius: "10px",
-                background: isDryRun ? "var(--accent)" : "#f87171",
-                color: "#fff",
-                verticalAlign: "middle",
-              }}>
-                {isDryRun ? "DRY RUN" : "실매매"}
-              </span>
-            </h3>
-            <p>
-              {status.strategyName} — 업데이트: {formatGeneratedAt(status.updatedAt)}
-            </p>
-          </div>
-          <div style={{ textAlign: "right", fontSize: "0.82rem", color: "var(--muted)" }}>
-            예산 {formatKrw(status.totalBudget)} / 코인당 {formatKrw(status.orderAmount)}
-          </div>
-        </div>
+    <section className="panel" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-        <div className="metric-grid" style={{ marginTop: "12px" }}>
-          <Metric label="시작 잔고" value={status.startBalance != null ? formatKrw(status.startBalance) : "-"} />
-          <Metric label="현재 총 평가액" value={formatKrw(status.balance.totalValue)} />
-          <Metric
-            label="수익"
-            value={pnl != null
-              ? `${pnl >= 0 ? "+" : ""}${formatKrw(Math.round(pnl))} (${pnlPct != null ? formatPct(pnlPct) : "-"})`
-              : "-"}
-          />
-          <Metric label="보유 포지션" value={`${positions.length}개`} />
-          <Metric label="누적 거래" value={`매수 ${status.trades.filter(t => t.side === "buy").length} / 매도 ${status.trades.filter(t => t.side === "sell").length}`} />
-        </div>
-      </section>
-
-      {/* 현재 포지션 */}
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>현재 포지션</h3>
-            <p>{positions.length > 0 ? `${positions.length}개 보유 중` : "보유 포지션 없음"}</p>
-          </div>
-          <strong style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
-            현금 {formatKrw(Math.round(status.balance.krwCash))}
-          </strong>
-        </div>
-        {positions.length > 0 ? (
-          <div className="table">
-            <div className="row header">
-              <span>코인</span>
-              <span>수량</span>
-              <span>평균 매입가</span>
-              <span>최고가</span>
-              <span>진입 시간</span>
-              <span>시나리오</span>
-            </div>
-            {positions.map(pos => (
-              <div className="row" key={pos.market}>
-                <span><strong>{shortMarket(pos.market)}</strong></span>
-                <span>{parseFloat(pos.quantity).toFixed(4)}</span>
-                <span>{formatKrw(Math.round(pos.avgBuyPrice))}</span>
-                <span>{pos.highestPrice > 0 ? formatKrw(Math.round(pos.highestPrice)) : "-"}</span>
-                <span>{new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Seoul" }).format(new Date(pos.entryAt))}</span>
-                <span style={{ color: "var(--muted)", fontSize: "0.78rem" }}>
-                  {isDryRun ? "dry-run" : "live"}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">포지션 없음</div>
+      {/* ── 헤더 ──────────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <p className="eyebrow" style={{ margin: 0 }}>LIVE TRADE</p>
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+          background: isDryRun ? "#64748b" : "#ef4444", color: "#fff",
+        }}>
+          {isDryRun ? "DRY RUN" : "실매매"}
+        </span>
+        {isStale && (
+          <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4, background: "#f59e0b", color: "#fff" }}>
+            오래된 데이터
+          </span>
         )}
-        {/* 잔고 현황 */}
-        <div className="metric-grid" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
-          <Metric label="보유 현금" value={formatKrw(Math.round(status.balance.krwCash))} />
-          <Metric label="매입가" value={formatKrw(Math.round(status.balance.invested))} />
-          <Metric label="평가 가치" value={formatKrw(Math.round(status.balance.coinValue))} />
-          <Metric
-            label="미실현 손익"
-            value={`${status.balance.coinValue >= status.balance.invested ? "+" : ""}${formatKrw(Math.round(status.balance.coinValue - status.balance.invested))}`}
-          />
-        </div>
-      </section>
+        <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: "auto" }}>
+          업데이트: {liveTimeFmt(status.updatedAt)}
+        </span>
+      </div>
 
-      {/* 최근 거래 내역 */}
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>최근 거래 이력 (최근 90건)</h3>
-            <p>누적 {status.trades.length}건</p>
-          </div>
-        </div>
-        {recentTrades.length > 0 ? (
-          <div className="trade-list">
-            <div className="trade-row header">
-              <span>시간</span>
-              <span>코인</span>
-              <span>매수/매도</span>
-              <span>금액</span>
-              <span>체결가</span>
-              <span>손익</span>
-            </div>
-            {recentTrades.map((trade, idx) => (
-              <div className="trade-row" key={`${trade.at}-${idx}`}>
-                <span>{new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Seoul" }).format(new Date(trade.at))}</span>
-                <span><strong>{shortMarket(trade.market)}</strong></span>
-                <span className={trade.side === "buy" ? "gain" : "loss"}>
-                  {trade.side === "buy" ? "매수" : "매도"}
-                </span>
-                <span>{formatKrw(Math.round(trade.side === "buy" ? trade.amount : trade.amount * trade.price))}</span>
-                <span>{formatKrw(Math.round(trade.actualPrice ?? trade.price))}</span>
-                <span className={trade.pnlKrw != null ? (trade.pnlKrw >= 0 ? "gain" : "loss") : ""}>
-                  {trade.pnlKrw != null ? `${trade.pnlKrw >= 0 ? "+" : ""}${formatKrw(Math.round(trade.pnlKrw))}` : "-"}
-                </span>
-              </div>
-            ))}
-          </div>
+      {/* ── 요약 타일 5개 ─────────────────────────────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+        <LiveTile label="시작 잔고" value={liveKrwFmt(startBalance)} />
+        <LiveTile label="현재 총 평가액" value={liveKrwFmt(currentTotal)} />
+        <LiveTile label="수익"
+          value={`${pnl >= 0 ? "+" : ""}${liveKrwFmt(pnl)} (${pnl >= 0 ? "+" : ""}${(pnlPct * 100).toFixed(2)}%)`}
+          color={pnlColor}
+        />
+        <LiveTile label="보유 포지션" value={`${positions.length}개`} />
+        <LiveTile label="누적 거래" value={`매수 ${buyCount} / 매도 ${sellCount}`} />
+      </div>
+
+      {/* ── 현재 포지션 ───────────────────────────────────────────────────── */}
+      <div>
+        <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--muted)" }}>현재 포지션</h4>
+        {positions.length === 0 ? (
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>보유 포지션 없음</p>
         ) : (
-          <div className="empty-state">거래 내역 없음 — 신호 대기 중</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["코인", "수량", "평균 매입가", "매입가", "진입 시간", "시나리오"].map(h => (
+                  <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: "var(--muted)", fontWeight: 500 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map(p => {
+                const qty      = parseFloat(p.quantity);
+                const invested = qty * p.avgBuyPrice;
+                return (
+                  <tr key={p.market} style={{ borderBottom: "1px solid var(--border-subtle, #232a38)" }}>
+                    <td style={{ padding: "6px 8px", fontWeight: 700 }}>{shortMarket(p.market)}</td>
+                    <td style={{ padding: "6px 8px" }}>{qty.toLocaleString(undefined, { maximumSignificantDigits: 6 })}</td>
+                    <td style={{ padding: "6px 8px" }}>{Math.round(p.avgBuyPrice).toLocaleString("ko-KR")}원</td>
+                    <td style={{ padding: "6px 8px" }}>{liveKrwFmt(invested)}</td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{liveTimeFmt(p.entryAt)}</td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)", fontSize: 11 }}>
+                      {p.orderUuid === "dry-run" ? "DRY" : p.orderUuid === "synced-from-upbit" ? "동기화" : "live"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
-      </section>
+      </div>
 
-      {/* 감시 코인 목록 */}
-      <section className="panel">
-        <div className="section-head">
-          <div>
-            <h3>감시 코인 목록</h3>
-            <p>{status.selectedMarkets.length}개 구독 중</p>
-          </div>
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" }}>
-          {status.selectedMarkets.map(market => (
-            <span
-              key={market}
-              style={{
-                padding: "3px 10px",
-                borderRadius: "12px",
-                background: status.positions[market] ? "var(--accent)" : "var(--surface-raised)",
-                color: status.positions[market] ? "#fff" : "var(--text)",
-                fontSize: "0.82rem",
-                fontWeight: status.positions[market] ? 700 : 400,
-              }}
-            >
-              {shortMarket(market)}
+      {/* ── 잔고 현황 ─────────────────────────────────────────────────────── */}
+      {status.startSnapshot ? (
+        <div>
+          <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--muted)" }}>
+            잔고 현황
+            <span style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
+              ({new Date(status.startSnapshot.at).toLocaleTimeString("ko-KR", { hour12: false })} 기준)
             </span>
-          ))}
+          </h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+            <LiveTile label="보유 현금"  value={liveKrwFmt(status.balance.krwCash)} />
+            <LiveTile label="매입가"     value={liveKrwFmt(status.balance.invested)} />
+            <LiveTile label="평가 가치"  value={liveKrwFmt(status.balance.coinValue)} />
+            <LiveTile label="손익"
+              value={liveKrwFmt(status.balance.coinValue - status.balance.invested)}
+              color={(status.balance.coinValue - status.balance.invested) >= 0 ? "#4ade80" : "#f87171"}
+            />
+            <LiveTile label="시작 자산"  value={liveKrwFmt(startBalance)} />
+          </div>
         </div>
-      </section>
-    </>
+      ) : (
+        /* startSnapshot 없는 구버전 state — 현재 balance로 표시 */
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+          <LiveTile label="보유 현금"  value={liveKrwFmt(status.balance.krwCash)} />
+          <LiveTile label="매입가"     value={liveKrwFmt(status.balance.invested)} />
+          <LiveTile label="평가 가치"  value={liveKrwFmt(status.balance.coinValue)} />
+          <LiveTile label="시작 자산"  value={liveKrwFmt(startBalance)} />
+        </div>
+      )}
+
+      {/* ── 최근 거래 이력 ────────────────────────────────────────────────── */}
+      <div>
+        <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, color: "var(--muted)" }}>
+          최근 거래 이력 (최근 24시간 · {recentTrades.length}건)
+        </h4>
+        {recentTrades.length === 0 ? (
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>거래 없음 — 신호 대기 중</p>
+        ) : (
+          <div style={{ overflowY: "auto", maxHeight: 360, border: "1px solid var(--border)", borderRadius: 6 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead style={{ position: "sticky", top: 0, background: "var(--panel-bg, #16202d)", zIndex: 1 }}>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  {["시간", "코인", "매수/매도", "금액", "체결가", "체결 후 총 평가액"].map(h => (
+                    <th key={h} style={{ textAlign: "left", padding: "6px 10px", color: "var(--muted)", fontWeight: 500 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {recentTrades.map((t, i) => {
+                  const isBuy      = t.side === "buy";
+                  const amount     = isBuy ? t.amount : (t.netKrw ?? t.amount * t.price);
+                  const totalAfter = t.portfolioAfter?.totalValue;
+                  return (
+                    <tr key={i} style={{
+                      borderBottom: "1px solid var(--border-subtle, #232a38)",
+                      background: isBuy
+                        ? "color-mix(in srgb, #4ade80 6%, transparent)"
+                        : "color-mix(in srgb, #f87171 6%, transparent)",
+                    }}>
+                      <td style={{ padding: "6px 10px", color: "var(--muted)" }}>{liveTimeFmt(t.at)}</td>
+                      <td style={{ padding: "6px 10px", fontWeight: 700 }}>{shortMarket(t.market)}</td>
+                      <td style={{ padding: "6px 10px", fontWeight: 700, color: isBuy ? "#4ade80" : "#f87171" }}>
+                        {isBuy ? "매수" : "매도"}{t.dryRun ? " (dry)" : ""}
+                      </td>
+                      <td style={{ padding: "6px 10px" }}>{liveKrwFmt(amount)}</td>
+                      <td style={{ padding: "6px 10px" }}>
+                        {Math.round(t.actualPrice ?? t.price).toLocaleString("ko-KR")}원
+                        {t.actualPrice && t.actualPrice !== t.price
+                          ? <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: 4 }}>실</span>
+                          : null}
+                      </td>
+                      <td style={{ padding: "6px 10px" }}>
+                        {totalAfter != null ? (
+                          <>
+                            {Math.floor(totalAfter).toLocaleString("ko-KR")}원
+                            {startBalance > 0 ? (
+                              <span style={{ fontSize: 11, marginLeft: 6, color: totalAfter >= startBalance ? "#4ade80" : "#f87171" }}>
+                                {totalAfter >= startBalance ? "+" : ""}
+                                {(((totalAfter - startBalance) / startBalance) * 100).toFixed(2)}%
+                              </span>
+                            ) : null}
+                          </>
+                        ) : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

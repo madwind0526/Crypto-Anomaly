@@ -70,17 +70,27 @@ interface LivePosition {
   highestPrice: number;      // trailing stop 계산용 최고가
 }
 
+interface PortfolioSnapshot {
+  krwCash:    number;
+  invested:   number;
+  coinValue:  number;
+  totalValue: number;
+  pnl:        number;
+  at:         string;
+}
+
 interface LiveTradeLog {
-  at:          string;
-  market:      string;
-  side:        "buy" | "sell";
-  amount:      number;       // KRW (buy) | 코인 수량 (sell)
-  price:       number;       // 추정 체결가
-  actualPrice?: number;
-  netKrw?:     number;
-  pnlKrw?:     number;
-  dryRun:      boolean;
-  reasonCodes: string[];
+  at:             string;
+  market:         string;
+  side:           "buy" | "sell";
+  amount:         number;       // KRW (buy) | 코인 수량 (sell)
+  price:          number;       // 추정 체결가
+  actualPrice?:   number;
+  netKrw?:        number;
+  pnlKrw?:        number;
+  portfolioAfter?: PortfolioSnapshot;  // 체결 직후 포트폴리오 스냅샷
+  dryRun:         boolean;
+  reasonCodes:    string[];
 }
 
 interface PendingBuy {
@@ -103,16 +113,18 @@ interface PendingSell {
 }
 
 interface LiveState {
-  startedAt:    string;
-  strategyId:   TraderId;
-  strategyName: string;
-  totalBudget:  number;
-  positions:    Record<string, LivePosition>;
-  trades:       LiveTradeLog[];
-  lastSellAt:   Record<string, number>;     // market → candle timestamp
-  pendingBuys?:  Record<string, PendingBuy>;
-  pendingSells?: Record<string, PendingSell>;
-  startBalance?: number;
+  startedAt:      string;
+  strategyId:     TraderId;
+  strategyName:   string;
+  totalBudget:    number;
+  positions:      Record<string, LivePosition>;
+  trades:         LiveTradeLog[];
+  lastSellAt:     Record<string, number>;
+  pendingBuys?:   Record<string, PendingBuy>;
+  pendingSells?:  Record<string, PendingSell>;
+  startBalance?:  number;
+  startSnapshot?: PortfolioSnapshot;   // 최초 기동 시 포트폴리오 스냅샷
+  krwBalance:     number;              // 실시간 현금 잔고 (거래마다 갱신)
 }
 
 // ── WebSocket 타입 ────────────────────────────────────────────────────────────
@@ -412,9 +424,13 @@ async function init() {
     await reconcilePending();
   }
 
-  const startBal = await computeBalance();
-  if (!state.startBalance) {
-    state.startBalance = startBal.totalValue;
+  // startSnapshot: 최초 기동 시에만 설정 (재시작해도 유지)
+  if (!state.startSnapshot) {
+    state.startSnapshot = buildPortfolioSnapshot();
+    state.startBalance = state.startSnapshot.totalValue;
+    await saveState(state);
+  } else if (!state.startBalance) {
+    state.startBalance = state.startSnapshot.totalValue;
     await saveState(state);
   }
   statusPublishingEnabled = true;
@@ -439,7 +455,17 @@ async function loadCandleHistory() {
 
 async function loadState(): Promise<LiveState> {
   try {
-    return JSON.parse(await readFile(statePath, "utf8")) as LiveState;
+    const loaded = JSON.parse(await readFile(statePath, "utf8")) as LiveState;
+    // Migration: 이전 버전에 krwBalance 없으면 누적 거래로 추정
+    if (typeof loaded.krwBalance !== "number") {
+      let balance = TOTAL_BUDGET;
+      for (const t of loaded.trades) {
+        if (t.side === "buy")  balance -= (t.netKrw ?? t.amount);
+        else if (t.side === "sell") balance += (t.netKrw ?? t.amount * t.price);
+      }
+      loaded.krwBalance = Math.max(0, balance);
+    }
+    return loaded;
   } catch {
     const fresh: LiveState = {
       startedAt: new Date().toISOString(),
@@ -447,6 +473,7 @@ async function loadState(): Promise<LiveState> {
       strategyName: activeStrategyName,
       totalBudget: TOTAL_BUDGET,
       positions: {}, trades: [], lastSellAt: {},
+      krwBalance: TOTAL_BUDGET,
     };
     await saveState(fresh);
     return fresh;
@@ -465,13 +492,21 @@ async function saveState(s: LiveState): Promise<void> {
 }
 
 // ── 잔고 ─────────────────────────────────────────────────────────────────────
+function buildPortfolioSnapshot(): PortfolioSnapshot {
+  const invested  = Object.values(state.positions).reduce((s, p) => s + parseFloat(p.quantity) * p.avgBuyPrice, 0);
+  const coinValue = Object.values(state.positions).reduce((s, p) => s + parseFloat(p.quantity) * getLatestPrice(p.market, p.avgBuyPrice), 0);
+  return {
+    krwCash: state.krwBalance, invested, coinValue,
+    totalValue: state.krwBalance + coinValue,
+    pnl: state.krwBalance + coinValue - TOTAL_BUDGET,
+    at: new Date().toISOString(),
+  };
+}
+
 async function computeBalance() {
   if (DRY_RUN) {
-    const invested = Object.values(state.positions)
-      .reduce((s, p) => s + parseFloat(p.quantity) * p.avgBuyPrice, 0);
-    const coinValue = Object.values(state.positions)
-      .reduce((s, p) => s + parseFloat(p.quantity) * getLatestPrice(p.market, p.avgBuyPrice), 0);
-    return { krwCash: Math.max(0, TOTAL_BUDGET - invested), invested, coinValue, totalValue: Math.max(0, TOTAL_BUDGET - invested) + coinValue };
+    const snapshot = buildPortfolioSnapshot();
+    return { krwCash: snapshot.krwCash, invested: snapshot.invested, coinValue: snapshot.coinValue, totalValue: snapshot.totalValue };
   }
   try {
     const accounts = await getAccounts(ACCESS_KEY, SECRET_KEY);
@@ -567,6 +602,7 @@ async function writePublicStatus() {
     totalBudget: TOTAL_BUDGET, budgetPerCoin: BUDGET_PER_COIN, orderAmount: ORDER_AMOUNT,
     selectedMarkets, positions: state?.positions ?? {}, trades: state?.trades ?? [],
     balance, startBalance: state?.startBalance,
+    startSnapshot: state?.startSnapshot,
   };
   try {
     await mkdir(path.dirname(publicStatusPath), { recursive: true });
@@ -736,8 +772,12 @@ async function executeBuy(market: string, price: number, reasonCodes: string[]) 
 
     if (DRY_RUN) {
       console.log(`[dry-run] ${log}`);
-      state.positions[market] = { market, quantity: String((ORDER_AMOUNT / price).toFixed(8)), avgBuyPrice: price, entryAt: new Date().toISOString(), orderUuid: "dry-run", highestPrice: price };
-      state.trades.push({ at: new Date().toISOString(), market, side: "buy", amount: ORDER_AMOUNT, price, dryRun: true, reasonCodes });
+      const FEE = 0.0005;
+      const qty = (ORDER_AMOUNT * (1 - FEE)) / price;
+      state.krwBalance = Math.max(0, state.krwBalance - ORDER_AMOUNT);
+      state.positions[market] = { market, quantity: qty.toFixed(8), avgBuyPrice: price, entryAt: new Date().toISOString(), orderUuid: "dry-run", highestPrice: price };
+      const portfolioAfter = buildPortfolioSnapshot();
+      state.trades.push({ at: new Date().toISOString(), market, side: "buy", amount: ORDER_AMOUNT, price, netKrw: ORDER_AMOUNT, portfolioAfter, dryRun: true, reasonCodes });
       await saveState(state);
       return;
     }
@@ -794,11 +834,16 @@ async function executeSell(market: string, position: LivePosition, price: number
 
     if (DRY_RUN) {
       console.log(`[dry-run] ${log}`);
+      const FEE = 0.0005;
       const qty = parseFloat(position.quantity);
-      const netKrw = qty * price * (1 - 0.0005);
+      const netKrw = qty * price * (1 - FEE);
       const pnlKrw = netKrw - qty * position.avgBuyPrice;
+      state.krwBalance += netKrw;
+      const candleTs = closedCandles[market]?.at(-1)?.timestamp;
+      if (candleTs) state.lastSellAt[market] = candleTs;
       delete state.positions[market];
-      state.trades.push({ at: new Date().toISOString(), market, side: "sell", amount: qty, price, netKrw, pnlKrw, dryRun: true, reasonCodes });
+      const portfolioAfter = buildPortfolioSnapshot();
+      state.trades.push({ at: new Date().toISOString(), market, side: "sell", amount: qty, price, netKrw, pnlKrw, portfolioAfter, dryRun: true, reasonCodes });
       await saveState(state);
       return;
     }
