@@ -833,10 +833,11 @@ async function runCycle() {
   // `Object.keys(perCoinParams).length === 0` guard below never fires.
   perCoinParams = {};
   const optimizedCache = await readJsonOrNull<any>(optimizedParamsPath);
-  if (optimizedCache?.date === today && typeof optimizedCache.source === "string" && optimizedCache.source.startsWith("1m-7d-backtracking") && optimizedCache.params) {
+  // Accept params from both inline optimization and daily-rollover script
+  if (optimizedCache?.date === today && optimizedCache.params) {
     perCoinParams = optimizedCache.params ?? {};
     const n = Object.keys(perCoinParams).length;
-    if (n > 0) console.log(`  Loaded per-coin optimized params: ${n} markets`);
+    if (n > 0) console.log(`  Loaded per-coin optimized params: ${n} markets (source: ${optimizedCache.source ?? "unknown"})`);
   }
 
   const sampleMarket  = Object.keys(live1m)[0] ?? Object.keys(backtracking1m)[0] ?? "";

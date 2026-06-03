@@ -12,6 +12,8 @@
                     "sim:anomaly":  "node scripts/anomaly-variants-sim.mjs",
                     "sim:anomaly:loop":  "node scripts/anomaly-variants-sim.mjs --loop=60000",
                     "sim:anomaly:watchdog":  "node scripts/anomaly-watchdog.mjs",
+                    "rollover":  "node scripts/anomaly-daily-rollover.mjs",
+                    "rollover:dry":  "ROLLOVER_DRY_RUN=true node scripts/anomaly-daily-rollover.mjs",
                     "live:dry":  "node --env-file=.env scripts/anomaly-live-trader.mjs --dry-run",
                     "live":  "node --env-file=.env scripts/anomaly-live-trader.mjs",
                     "test":  "vitest run",
