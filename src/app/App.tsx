@@ -36,7 +36,8 @@ type ScreenId =
   | "daily-general-a"
   | "daily-general-b"
   | "daily-general-c"
-  | "daily-anomaly";
+  | "daily-anomaly"
+  | "live-trade";
 type PopupTab = "graph" | "trades" | "returns" | "balance";
 type OperationPopupTab = Exclude<PopupTab, "graph">;
 type GuideFilterMode = GuideRuleMode | "all";
@@ -51,7 +52,45 @@ const screenIds: ScreenId[] = [
   "daily-general-b",
   "daily-general-c",
   "daily-anomaly",
+  "live-trade",
 ];
+
+interface LivePosition {
+  market:       string;
+  quantity:     string;
+  avgBuyPrice:  number;
+  entryAt:      string;
+  orderUuid:    string;
+  highestPrice: number;
+}
+
+interface LiveTradeLog {
+  at:          string;
+  market:      string;
+  side:        "buy" | "sell";
+  amount:      number;
+  price:       number;
+  actualPrice?: number;
+  netKrw?:     number;
+  pnlKrw?:     number;
+  dryRun:      boolean;
+  reasonCodes: string[];
+}
+
+interface LiveTradeStatus {
+  updatedAt:    string;
+  mode:         "dry-run" | "live";
+  strategyId:   string;
+  strategyName: string;
+  totalBudget:  number;
+  budgetPerCoin: number;
+  orderAmount:  number;
+  selectedMarkets: string[];
+  positions:    Record<string, LivePosition>;
+  trades:       LiveTradeLog[];
+  balance:      { krwCash: number; invested: number; coinValue: number; totalValue: number };
+  startBalance?: number;
+}
 
 type PopupState =
   | { blockedSignals: BlockedSignal[]; currentReturn: number; dayStartMs: number | undefined; kind: "market"; market: string; tradeSummary: TradeSummary; trades: Trade[] }
@@ -188,6 +227,12 @@ const menuSections: MenuSection[] = [
       { id: "daily-anomaly", label: "Anomaly-D", caption: "Sweep Best" },
     ],
   },
+  {
+    title: "Live Trade",
+    items: [
+      { id: "live-trade", label: "Live Trading", caption: "Dry-run / 실매매" },
+    ],
+  },
 ];
 
 const dailyScreens: Record<
@@ -242,6 +287,7 @@ export function App() {
   const [dashboardResults, setDashboardResults] = useState<DashboardResults | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<StrategyRefreshStatus | null>(null);
   const [wsLiveResults, setWsLiveResults] = useState<WsLiveResults | null>(null);
+  const [liveTradeStatus, setLiveTradeStatus] = useState<LiveTradeStatus | null>(null);
   const [importNotice, setImportNotice] = useState("아직 import된 전략 파일이 없습니다.");
   const lastRefreshCompletedAtRef = useRef("");
   const lastDailyMarketGeneratedAtRef = useRef("");
@@ -340,6 +386,26 @@ export function App() {
 
     pollWsLiveResults();
     const timer = window.setInterval(pollWsLiveResults, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function pollLiveTradeStatus() {
+      try {
+        const res = await fetch("/market/anomaly-live-trade-status.json", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json() as LiveTradeStatus;
+        if (active) setLiveTradeStatus(data);
+      } catch { /* not running */ }
+    }
+
+    pollLiveTradeStatus();
+    const timer = window.setInterval(pollLiveTradeStatus, 10_000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -551,6 +617,9 @@ export function App() {
             onGuideModeChange={updateSharedGuideMode}
             plans={activeOptimizationPlans}
           />
+        ) : null}
+        {screenId === "live-trade" ? (
+          <LiveTradeView status={liveTradeStatus} />
         ) : null}
         {isDailyScreen ? (
           <DailyOperationView
@@ -2517,6 +2586,7 @@ function getScreenKicker(screenId: ScreenId) {
   if (screenId.startsWith("scenario")) return "전략 개요";
   if (screenId.startsWith("report")) return "시뮬레이션 결과";
   if (screenId.startsWith("daily")) return "Daily 운영";
+  if (screenId === "live-trade") return "Live Trade";
   return "";
 }
 
@@ -2577,6 +2647,193 @@ function shortStrategyName(id: TraderId) {
   if (id === "range-grid") return "Anomaly-B";
   if (id === "arbitrage") return "Anomaly-C";
   return "Anomaly-D";
+}
+
+// ─── Live Trade View ──────────────────────────────────────────────────────────
+function LiveTradeView({ status }: { status: LiveTradeStatus | null }) {
+  if (!status) {
+    return (
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h3>Live Trading</h3>
+            <p>anomaly-live-trader가 실행되지 않았거나 상태 파일이 없습니다.</p>
+          </div>
+          <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>연결 안됨</span>
+        </div>
+        <div className="empty-state" style={{ marginTop: "24px" }}>
+          <p>npm run live:dry 또는 npm run live 실행 후 대기 중...</p>
+        </div>
+      </section>
+    );
+  }
+
+  const positions = Object.values(status.positions);
+  const isDryRun = status.mode === "dry-run";
+  const pnl = status.startBalance != null ? status.balance.totalValue - status.startBalance : null;
+  const pnlPct = pnl != null && status.startBalance ? pnl / status.startBalance : null;
+
+  // 최근 90건 거래 내역 (최신순)
+  const recentTrades = status.trades.slice().reverse().slice(0, 90);
+
+  return (
+    <>
+      {/* 상단 KPI */}
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h3>
+              Live Trading
+              <span style={{
+                marginLeft: "10px",
+                fontSize: "0.72rem",
+                padding: "2px 8px",
+                borderRadius: "10px",
+                background: isDryRun ? "var(--accent)" : "#f87171",
+                color: "#fff",
+                verticalAlign: "middle",
+              }}>
+                {isDryRun ? "DRY RUN" : "실매매"}
+              </span>
+            </h3>
+            <p>
+              {status.strategyName} — 업데이트: {formatGeneratedAt(status.updatedAt)}
+            </p>
+          </div>
+          <div style={{ textAlign: "right", fontSize: "0.82rem", color: "var(--muted)" }}>
+            예산 {formatKrw(status.totalBudget)} / 코인당 {formatKrw(status.orderAmount)}
+          </div>
+        </div>
+
+        <div className="metric-grid" style={{ marginTop: "12px" }}>
+          <Metric label="시작 잔고" value={status.startBalance != null ? formatKrw(status.startBalance) : "-"} />
+          <Metric label="현재 총 평가액" value={formatKrw(status.balance.totalValue)} />
+          <Metric
+            label="수익"
+            value={pnl != null
+              ? `${pnl >= 0 ? "+" : ""}${formatKrw(Math.round(pnl))} (${pnlPct != null ? formatPct(pnlPct) : "-"})`
+              : "-"}
+          />
+          <Metric label="보유 포지션" value={`${positions.length}개`} />
+          <Metric label="누적 거래" value={`매수 ${status.trades.filter(t => t.side === "buy").length} / 매도 ${status.trades.filter(t => t.side === "sell").length}`} />
+        </div>
+      </section>
+
+      {/* 현재 포지션 */}
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h3>현재 포지션</h3>
+            <p>{positions.length > 0 ? `${positions.length}개 보유 중` : "보유 포지션 없음"}</p>
+          </div>
+          <strong style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+            현금 {formatKrw(Math.round(status.balance.krwCash))}
+          </strong>
+        </div>
+        {positions.length > 0 ? (
+          <div className="table">
+            <div className="row header">
+              <span>코인</span>
+              <span>수량</span>
+              <span>평균 매입가</span>
+              <span>최고가</span>
+              <span>진입 시간</span>
+              <span>시나리오</span>
+            </div>
+            {positions.map(pos => (
+              <div className="row" key={pos.market}>
+                <span><strong>{shortMarket(pos.market)}</strong></span>
+                <span>{parseFloat(pos.quantity).toFixed(4)}</span>
+                <span>{formatKrw(Math.round(pos.avgBuyPrice))}</span>
+                <span>{pos.highestPrice > 0 ? formatKrw(Math.round(pos.highestPrice)) : "-"}</span>
+                <span>{new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Seoul" }).format(new Date(pos.entryAt))}</span>
+                <span style={{ color: "var(--muted)", fontSize: "0.78rem" }}>
+                  {isDryRun ? "dry-run" : "live"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">포지션 없음</div>
+        )}
+        {/* 잔고 현황 */}
+        <div className="metric-grid" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
+          <Metric label="보유 현금" value={formatKrw(Math.round(status.balance.krwCash))} />
+          <Metric label="매입가" value={formatKrw(Math.round(status.balance.invested))} />
+          <Metric label="평가 가치" value={formatKrw(Math.round(status.balance.coinValue))} />
+          <Metric
+            label="미실현 손익"
+            value={`${status.balance.coinValue >= status.balance.invested ? "+" : ""}${formatKrw(Math.round(status.balance.coinValue - status.balance.invested))}`}
+          />
+        </div>
+      </section>
+
+      {/* 최근 거래 내역 */}
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h3>최근 거래 이력 (최근 90건)</h3>
+            <p>누적 {status.trades.length}건</p>
+          </div>
+        </div>
+        {recentTrades.length > 0 ? (
+          <div className="trade-list">
+            <div className="trade-row header">
+              <span>시간</span>
+              <span>코인</span>
+              <span>매수/매도</span>
+              <span>금액</span>
+              <span>체결가</span>
+              <span>손익</span>
+            </div>
+            {recentTrades.map((trade, idx) => (
+              <div className="trade-row" key={`${trade.at}-${idx}`}>
+                <span>{new Intl.DateTimeFormat("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Seoul" }).format(new Date(trade.at))}</span>
+                <span><strong>{shortMarket(trade.market)}</strong></span>
+                <span className={trade.side === "buy" ? "gain" : "loss"}>
+                  {trade.side === "buy" ? "매수" : "매도"}
+                </span>
+                <span>{formatKrw(Math.round(trade.side === "buy" ? trade.amount : trade.amount * trade.price))}</span>
+                <span>{formatKrw(Math.round(trade.actualPrice ?? trade.price))}</span>
+                <span className={trade.pnlKrw != null ? (trade.pnlKrw >= 0 ? "gain" : "loss") : ""}>
+                  {trade.pnlKrw != null ? `${trade.pnlKrw >= 0 ? "+" : ""}${formatKrw(Math.round(trade.pnlKrw))}` : "-"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">거래 내역 없음 — 신호 대기 중</div>
+        )}
+      </section>
+
+      {/* 감시 코인 목록 */}
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h3>감시 코인 목록</h3>
+            <p>{status.selectedMarkets.length}개 구독 중</p>
+          </div>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" }}>
+          {status.selectedMarkets.map(market => (
+            <span
+              key={market}
+              style={{
+                padding: "3px 10px",
+                borderRadius: "12px",
+                background: status.positions[market] ? "var(--accent)" : "var(--surface-raised)",
+                color: status.positions[market] ? "#fff" : "var(--text)",
+                fontSize: "0.82rem",
+                fontWeight: status.positions[market] ? 700 : 400,
+              }}
+            >
+              {shortMarket(market)}
+            </span>
+          ))}
+        </div>
+      </section>
+    </>
+  );
 }
 
 function clamp01(value: number) {
