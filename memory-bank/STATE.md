@@ -2,10 +2,10 @@
 
 ## Current Wave
 
-- **Wave:** 5 — 코드 리뷰 4라운드 버그 수정 (8건 추가, 누적 29건)
+- **Wave:** 6 — Anomaly-D 전략 리팩터: Sweep Best → Spike Retracement
 - **Status:** Ready
 - **Cache Status:** CLEAN
-- **Last Checkpoint:** 4라운드 리뷰 수정 완료 (2026-06-04)
+- **Last Checkpoint:** D 전략 눌림목 재진입 로직 구현 완료 (2026-06-04)
 
 ## Wave History
 

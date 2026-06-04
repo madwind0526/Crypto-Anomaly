@@ -91,7 +91,28 @@ ignored  / disabled (Guideline X, Safety X)
 
 ---
 
-## R-08. UI 기본값
+## R-08. D 전략 — Spike Retracement (2026-06-04 변경)
+
+**규칙:** Anomaly-D는 스파이크 발생 후 눌림목에서 재진입하는 전략이다. 전 경로(sim/optimize/live/ws) 동일 기준:
+
+```
+스파이크 감지: body ≥ 2.5%, vol ≥ 3.5×, 양봉 (최근 30봉 스캔)
+스파이크 고점: 스파이크 봉 + 직후 3봉 범위의 최고 high
+눌림목 진입:   retracePctMin(기본 3%) ≤ (spikeHigh − close) / spikeHigh ≤ 10%
+거래량 확인:   curVol ≥ 1.5× (아직 뜨거움)
+회복 확인:     close > open (양봉)
+```
+
+**최적화 파라미터:** `trailingStopPct`, `maxHoldCandles`, `retracePctMin`
+**기본값:** trail=0.022, maxHold=12, retracePctMin=0.030
+
+**이전 전략(Sweep Best) 대비 변경 이유:**
+- Sweep Best는 스파이크 중후반에 진입 → 정점 매수 + volume-fade 즉시 청산 패턴
+- Retracement는 눌림목 진입 → 진입가 낮음 + 2차 상승 노림
+
+---
+
+## R-09. UI 기본값
 
 **규칙:** Daily 운영 화면의 기본 모드는 아래와 같다.
 - Guideline 기본값: `"ignored"`

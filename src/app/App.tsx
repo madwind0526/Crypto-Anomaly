@@ -262,9 +262,9 @@ const dailyScreens: Record<
     description: "폭발 캔들 다음 봉에서 거래량 1.8× + 상승 유지를 확인 후 진입합니다.",
   },
   "daily-anomaly": {
-    title: "Anomaly-D / Sweep Best",
+    title: "Anomaly-D / Spike Retracement",
     traderId: "anomaly",
-    description: "최적화된 trailingStop(0.018) 적용 베이스라인. 특이점 감시 전체 커버.",
+    description: "스파이크 후 3~10% 눌림목에서 거래량이 아직 뜨거울 때 재진입합니다. 2차 상승을 노립니다.",
   },
 };
 
@@ -761,10 +761,10 @@ const ANOMALY_STRATEGY_INFO: Array<{
   {
     id: "anomaly",
     label: "Anomaly-D",
-    subtitle: "Sweep Best",
-    entry: "상대 거래량 ≥ 3.5×, 3봉 가격 가속 ≥ 2.0%, 24봉 고점 돌파, 과열 (48봉 ROC < 25%) 미초과.",
+    subtitle: "Spike Retracement",
+    entry: "스파이크 발생 후 3~10% 눌림목에서 재진입. 직전 30봉 내 body≥2.5%·vol≥3.5× 스파이크 감지, 거래량 1.5× 이상 유지 + 회복 양봉 확인 시 진입.",
     hold: "최대 12봉 (12분)",
-    trail: "1.8% (적응형)",
+    trail: "2.2% (적응형)",
     exit: "거래량 fade (< 1.2× 평균) 또는 시간 초과",
   },
 ];

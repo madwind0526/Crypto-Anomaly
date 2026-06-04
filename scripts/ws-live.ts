@@ -45,7 +45,7 @@ interface OptParams {
   curBodyMin?:      number;
   bodyMin?:         number;
   momentumBodyMin?: number;
-  accelerationMin?: number;
+  retracePctMin?:   number;
 }
 
 interface WsPos {
@@ -190,19 +190,36 @@ function checkEntryC(candles: Candle[], coinP?: OptParams | null): EntrySignal |
   return null;
 }
 
+// Anomaly-D: 스파이크 후 눌림목 재진입
 function checkEntryD(candles: Candle[], coinP?: OptParams | null): EntrySignal | null {
   const n = candles.length; if (n < 52) return null;
   const i = n - 1;
   const avgVol = getAvgVol48(candles, i); if (!avgVol) return null;
-  const volR = candles[i].volume / avgVol;
-  const accelerationMin = coinP?.accelerationMin ?? 0.020;
-  const maxExtendedMove = 0.25; // 1m 기준 (anomaly.ts makeSweepBestScenario와 동일)
-  const roc3  = getRoc(candles, i, 3)  ?? 0;
-  const roc48 = getRoc(candles, i, 48) ?? 0;
-  if (volR >= 3.5 && roc3 >= accelerationMin && roc48 < maxExtendedMove && candles[i].close > candles[i].open) {
-    return { trail: coinP?.trailingStopPct ?? 0.018, maxHold: coinP?.maxHoldCandles ?? 12 };
+
+  const retracePctMin = coinP?.retracePctMin ?? 0.030;
+
+  // 최근 스파이크 탐색 (30봉 내)
+  let spikeIdx = -1;
+  for (let k = 1; k <= Math.min(30, i - 1); k++) {
+    const j = i - k;
+    if (getBody(candles[j]) >= 0.025 && candles[j].volume / avgVol >= 2.5 && candles[j].close > candles[j].open) {
+      spikeIdx = j; break;
+    }
   }
-  return null;
+  if (spikeIdx < 0) return null;
+
+  // 스파이크 이후 최고점
+  const spikeHigh = candles.slice(spikeIdx, Math.min(spikeIdx + 4, i))
+    .reduce((m, c) => (c.high > m ? c.high : m), 0);
+  if (spikeHigh <= 0) return null;
+
+  // 눌림목 + 거래량 + 회복 양봉
+  const retrace = (spikeHigh - candles[i].close) / spikeHigh;
+  if (retrace < retracePctMin || retrace > 0.10) return null;
+  const curVol = candles[i].volume / avgVol;
+  if (curVol < 1.5 || candles[i].close <= candles[i].open) return null;
+
+  return { trail: coinP?.trailingStopPct ?? 0.022, maxHold: coinP?.maxHoldCandles ?? 12 };
 }
 
 const CHECK_ENTRY: Record<SlotId, (c: Candle[], p?: OptParams | null) => EntrySignal | null> = {

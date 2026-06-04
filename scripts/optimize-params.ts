@@ -20,7 +20,7 @@ export interface OptimizedCoinParams {
   curBodyMin?:      number;  // A
   bodyMin?:         number;  // B
   confirmVolMin?:   number;  // C
-  accelerationMin?: number;  // D
+  retracePctMin?:   number;  // D (Retracement)
   trades:           number;
   returnRate:       number;
   maxDrawdown:      number;
@@ -241,12 +241,19 @@ function backtestC(
   return { returnRate: cash - 1, trades, maxDrawdown, winRate: trades > 0 ? wins / trades : 0 };
 }
 
-// ─── Strategy D: Sweep Best (simplified entry — only trail/hold optimized) ────
-function backtestD(
+// ─── Strategy D: Spike Retracement Entry ──────────────────────────────────────
+// 스파이크 발생 후 3~10% 눌림목에서 거래량이 아직 뜨거울 때 재진입하여 2차 상승 노림
+const D_SPIKE_WIN    = 30;   // 최근 N봉 내 스파이크 탐색
+const D_RETRACE_MAX  = 0.10; // 스파이크 고점 대비 10% 초과 하락 시 패턴 무효
+const D_CONFIRM_VOL  = 1.5;  // 눌림목 진입 시 최소 거래량 배수
+const D_SPIKE_BODY   = 0.025;
+const D_SPIKE_VOL    = 2.5; // 리트레이스 탐지용 — 진입은 리트레이스 조건이 추가 필터링
+
+function backtestDRetrace(
   candles: Candle[], ind: Ind,
-  p: { trailingStopPct: number; maxHoldCandles: number; accelerationMin: number },
+  p: { trailingStopPct: number; maxHoldCandles: number; retracePctMin: number },
 ): BtResult {
-  const { trailingStopPct: trail, maxHoldCandles: maxHold, accelerationMin } = p;
+  const { trailingStopPct: trail, maxHoldCandles: maxHold, retracePctMin } = p;
   let cash = 1.0; let pos: Pos | null = null;
   let trades = 0; let wins = 0;
   let peakCash = 1.0; let maxDrawdown = 0;
@@ -257,7 +264,6 @@ function backtestD(
     if (pos) {
       pos.high = Math.max(pos.high, candles[i].high);
       const stop = pos.high * (1 - trail);
-      // Mirror anomalyStrategy.decide() exit: volumeFade fires when volume drops below avg
       const fade = avgVol !== null && candles[i].volume < avgVol * 1.2;
       if (price <= stop || fade || pos.hold >= maxHold) {
         const exitPrice = price <= stop ? stop : price;
@@ -269,15 +275,27 @@ function backtestD(
         maxDrawdown = Math.max(maxDrawdown, peakCash > 0 ? (peakCash - cash) / peakCash : 0);
       } else { pos.hold++; }
     } else {
-      const roc48 = ind.roc48[i];
-      if (avgVol === null || roc48 === null) continue;
-      const volR = candles[i].volume / avgVol;
-      const roc3 = i >= 3 ? (candles[i].close - candles[i - 3].close) / (candles[i - 3].close || 1) : 0;
-      // Mirror anomalyStrategy.decide(): relativeVolumeMin=3.5, breaksHigh, !isTooExtended(roc48>=0.25, 1m 기준)
-      const prevHigh = candles.slice(Math.max(0, i - 24), i).reduce((a, c) => (c.close > a ? c.close : a), -Infinity);
-      const breaksHigh = i < 24 || candles[i].close >= prevHigh;
-      const isTooExtended = roc48 >= 0.25;
-      if (volR >= 3.5 && roc3 >= accelerationMin && breaksHigh && !isTooExtended && candles[i].close > candles[i].open) {
+      if (avgVol === null) continue;
+      // 최근 스파이크 탐색
+      let spikeIdx = -1;
+      for (let k = 1; k <= Math.min(D_SPIKE_WIN, i - 1); k++) {
+        const j = i - k;
+        const body = ind.bodies[j];
+        if (body >= D_SPIKE_BODY && candles[j].volume / avgVol >= D_SPIKE_VOL && candles[j].close > candles[j].open) {
+          spikeIdx = j; break;
+        }
+      }
+      if (spikeIdx < 0) continue;
+      // 스파이크 이후 최고점
+      const spikeHigh = candles.slice(spikeIdx, Math.min(spikeIdx + 4, i))
+        .reduce((m, c) => (c.high > m ? c.high : m), 0);
+      if (spikeHigh <= 0) continue;
+      // 눌림목 확인
+      const retrace = (spikeHigh - price) / spikeHigh;
+      if (retrace < retracePctMin || retrace > D_RETRACE_MAX) continue;
+      // 거래량 여전히 뜨거움 + 회복 양봉
+      const curVol = candles[i].volume / avgVol;
+      if (curVol >= D_CONFIRM_VOL && candles[i].close > candles[i].open) {
         pos = openPos(price);
       }
     }
@@ -297,7 +315,7 @@ const MAX_HOLDS = [4, 6, 8, 10, 12, 16, 20];
 const BODY_MINS_A = [0.010, 0.012, 0.015, 0.018, 0.022];
 const BODY_MINS_B = [0.015, 0.018, 0.020, 0.025, 0.030];
 const CONF_VOL_C  = [1.2, 1.5, 1.8, 2.0, 2.5];
-const ACCEL_D     = [0.010, 0.015, 0.020, 0.025];
+const RETRACE_MIN_D = [0.020, 0.030, 0.040, 0.050]; // D: 눌림목 최소 비율
 
 // Require at least 1 completed trade to accept an optimization result.
 // Anomaly markets are low-frequency; setting MIN_TRADES=2 excludes too many markets.
@@ -338,8 +356,8 @@ export async function runOptimization(
     ({ trailingStopPct: t, maxHoldCandles: h, bodyMin: b }))));
   const combosC = TRAILS.flatMap(t => MAX_HOLDS.flatMap(h => CONF_VOL_C.map(v =>
     ({ trailingStopPct: t, maxHoldCandles: h, confirmVolMin: v }))));
-  const combosD = TRAILS.flatMap(t => MAX_HOLDS.flatMap(h => ACCEL_D.map(a =>
-    ({ trailingStopPct: t, maxHoldCandles: h, accelerationMin: a }))));
+  const combosD = TRAILS.flatMap(t => MAX_HOLDS.flatMap(h => RETRACE_MIN_D.map(r =>
+    ({ trailingStopPct: t, maxHoldCandles: h, retracePctMin: r }))));
 
   const totalCombos = (combosA.length + combosB.length + combosC.length + combosD.length) * marketNames.length;
   console.log(`  [opt] ${combosA.length + combosB.length + combosC.length + combosD.length} combos/market × ${marketNames.length} markets = ${totalCombos} backtests`);
@@ -362,8 +380,8 @@ export async function runOptimization(
       { trailingStopPct: 0.018, maxHoldCandles: 6,  bodyMin:        0.025 });
     const { params: pC, result: rC } = bestCombo(candles, ind, combosC, backtestC,
       { trailingStopPct: 0.022, maxHoldCandles: 8,  confirmVolMin:  1.8   });
-    const { params: pD, result: rD } = bestCombo(candles, ind, combosD, backtestD,
-      { trailingStopPct: 0.018, maxHoldCandles: 12, accelerationMin: 0.020 });
+    const { params: pD, result: rD } = bestCombo(candles, ind, combosD, backtestDRetrace,
+      { trailingStopPct: 0.022, maxHoldCandles: 12, retracePctMin: 0.030 });
 
     const tag = (r: BtResult) => `${(r.returnRate * 100).toFixed(1)}%(${r.trades}t,dd${(r.maxDrawdown * 100).toFixed(1)}%)`;
     console.log(`  [opt] ${market.replace("KRW-", "").padEnd(10)} A:${tag(rA)}  B:${tag(rB)}  C:${tag(rC)}  D:${tag(rD)}`);

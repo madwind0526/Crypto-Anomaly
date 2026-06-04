@@ -290,35 +290,56 @@ function decideC(candles: Candle[], i: number, position: LivePosition | null, sc
   return { action: "hold", confidence: 0, reasonCodes: ["no-confirm"], targetWeight: 0 };
 }
 
+// Anomaly-D: 스파이크 후 눌림목 재진입 전략
 function decideD(candles: Candle[], i: number, position: LivePosition | null): StrategyDecision {
-  const market = candles[0]?.market ?? "";
-  const coinP = perCoinParams[market]?.["anomaly"];
-  const sc: StrategyScenario = coinP ? {
-    ...anomalyScenario,
-    params: {
-      ...anomalyScenario.params,
-      trailingStopPct:  coinP.trailingStopPct,
-      maxHoldCandles:   coinP.maxHoldCandles,
-      accelerationMin:  coinP.accelerationMin ?? 0.020,
-      maxExtendedMove:  0.25,
-    },
-  } : {
-    ...anomalyScenario,
-    params: { ...anomalyScenario.params, accelerationMin: 0.020, maxExtendedMove: 0.25 },
-  };
+  const market  = candles[0]?.market ?? "";
+  const coinP   = perCoinParams[market]?.["anomaly"];
+  const trail   = coinP?.trailingStopPct ?? 0.022;
+  const maxHold = coinP?.maxHoldCandles  ?? 12;
+  const retracePctMin = coinP?.retracePctMin ?? 0.030;
 
-  const pos = position ? {
-    market, averagePrice: position.avgBuyPrice, quantity: parseFloat(position.quantity),
-    openedAt: new Date(position.entryAt).getTime(),
-    highestPrice: position.highestPrice || position.avgBuyPrice,
-    holdCandles: Math.floor((Date.now() - new Date(position.entryAt).getTime()) / 60_000),
-  } : null;
+  const ind = getInd(candles);
+  if (i < 52) return { action: "hold", confidence: 0, reasonCodes: ["warming-up"], targetWeight: 0 };
 
-  const ctx: StrategyContext = {
-    market, candles, candleIndex: i, position: pos,
-    portfolioValue: 0, lastSellPrice: undefined,
+  if (position) {
+    const avgVol   = ind.avgVol48[i];
+    const fade     = avgVol !== null && candles[i].volume < avgVol * 1.2;
+    const holdBars = Math.floor((Date.now() - new Date(position.entryAt).getTime()) / 60_000);
+    if (fade || holdBars >= maxHold)
+      return { action: "sell", confidence: 0.8, reasonCodes: [fade ? "volume-fade" : "time-stop"], targetWeight: 0 };
+    if (position.highestPrice > 0 && candles[i].close < position.highestPrice * (1 - trail))
+      return { action: "sell", confidence: 0.8, reasonCodes: ["trailing-stop"], targetWeight: 0 };
+    return { action: "hold", confidence: 0, reasonCodes: ["holding"], targetWeight: 0 };
+  }
+
+  const avgVol = ind.avgVol48[i];
+  if (!avgVol) return { action: "hold", confidence: 0, reasonCodes: ["no-data"], targetWeight: 0 };
+
+  // 최근 스파이크 탐색
+  let spikeIdx = -1;
+  for (let k = 1; k <= Math.min(30, i - 1); k++) {
+    const j = i - k;
+    if (ind.bodies[j] >= 0.025 && candles[j].volume / avgVol >= 2.5 && candles[j].close > candles[j].open) {
+      spikeIdx = j; break;
+    }
+  }
+  if (spikeIdx < 0) return { action: "hold", confidence: 0, reasonCodes: ["no-recent-spike"], targetWeight: 0 };
+
+  const spikeHigh = candles.slice(spikeIdx, Math.min(spikeIdx + 4, i))
+    .reduce((m, c) => (c.high > m ? c.high : m), 0);
+  const retrace   = spikeHigh > 0 ? (spikeHigh - candles[i].close) / spikeHigh : 0;
+  if (retrace < retracePctMin || retrace > 0.10)
+    return { action: "hold", confidence: 0, reasonCodes: ["retrace-check-fail"], targetWeight: 0 };
+
+  const curVol = candles[i].volume / avgVol;
+  if (curVol < 1.5 || candles[i].close <= candles[i].open)
+    return { action: "hold", confidence: 0, reasonCodes: ["entry-conditions-not-met"], targetWeight: 0 };
+
+  return {
+    action: "buy", confidence: 0.72,
+    reasonCodes: ["spike-retrace", `retrace-${(retrace * 100).toFixed(1)}%`, `vol×${curVol.toFixed(1)}`],
+    targetWeight: 0.95, stopLossPct: 0.018, trailingStopPct: trail, maxHoldCandles: maxHold,
   };
-  return anomalyStrategy.decide(ctx, sc);
 }
 
 type DecideFn = (candles: Candle[], i: number, position: LivePosition | null, scenario: StrategyScenario) => StrategyDecision;
@@ -366,7 +387,7 @@ async function selectBestStrategy(): Promise<{ id: TraderId; name: string }> {
     }
     const nameMap: Record<TraderId, string> = {
       "momentum": "Anomaly-A (Calm Impulse)", "range-grid": "Anomaly-B (First Explosion)",
-      "arbitrage": "Anomaly-C (Confirmed Burst)", "anomaly": "Anomaly-D (Sweep Best)",
+      "arbitrage": "Anomaly-C (Confirmed Burst)", "anomaly": "Anomaly-D (Spike Retracement)",
     };
     console.log(`[live-trader] 전략 선택:`);
     for (const [sid, total] of Object.entries(scores) as [TraderId, number][]) {
@@ -377,7 +398,7 @@ async function selectBestStrategy(): Promise<{ id: TraderId; name: string }> {
     return { id: best, name: nameMap[best] };
   } catch (e) {
     console.warn(`[live-trader] dashboard-results 없음, Anomaly-D 기본 사용: ${String(e).slice(0, 80)}`);
-    return { id: "anomaly", name: "Anomaly-D (Sweep Best)" };
+    return { id: "anomaly", name: "Anomaly-D (Spike Retracement)" };
   }
 }
 
@@ -414,10 +435,16 @@ async function init() {
     console.log("[live-trader] 🔴 실매매 모드");
   }
 
-  // 전략 선택
-  const best = await selectBestStrategy();
-  activeStrategy = best.id;
-  activeStrategyName = best.name;
+  // 전략 선택 — 기본값 Anomaly-D. 변경 시: LIVE_STRATEGY_ID=momentum|range-grid|arbitrage|anomaly
+  const STRATEGY_NAME_MAP: Record<TraderId, string> = {
+    "momentum":   "Anomaly-A (Calm Impulse)",
+    "range-grid": "Anomaly-B (First Explosion)",
+    "arbitrage":  "Anomaly-C (Confirmed Burst)",
+    "anomaly":    "Anomaly-D (Spike Retracement)",
+  };
+  const envStrategyId = process.env.LIVE_STRATEGY_ID as TraderId | undefined;
+  activeStrategy     = (envStrategyId && envStrategyId in STRATEGY_NAME_MAP) ? envStrategyId : "anomaly";
+  activeStrategyName = STRATEGY_NAME_MAP[activeStrategy];
 
   // 코인 선택 (anomaly-selection.json)
   const selection = JSON.parse(await readFile(selectionPath, "utf8")) as any;

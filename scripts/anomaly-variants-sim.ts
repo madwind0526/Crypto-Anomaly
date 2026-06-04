@@ -435,20 +435,61 @@ function decideD(ctx: StrategyContext, sc: StrategyScenario): StrategyDecision {
   });
 }
 
-function makeSweepBestScenario(adapted: AdaptedParams): StrategyScenario {
-  return {
-    ...anomalyScenario,
-    id: "anomaly-sweep-best",
-    name: "Sweep-best",
-    params: {
-      ...anomalyScenario.params,
-      trailingStopPct:   adapted.trailingStopPct,
-      // 1m 캔들 기준 재조정: 3분 ROC 2% (원래 4.5%는 5m 기준)
-      accelerationMin:   0.020,
-      // 48분 과열 기준도 완화 (1m에서 pump 자체가 18% 내에 들어올 수 있음)
-      maxExtendedMove:   0.25,
-    },
-  };
+// ─── Anomaly-D: Spike Retracement Entry ──────────────────────────────────────
+// 스파이크 발생 후 눌림목(3~10%)에서 거래량이 아직 뜨거울 때 재진입 → 2차 상승 노림
+const D_SPIKE_WIN   = 30;   // 최근 N봉 내 스파이크 탐색
+const D_RETRACE_MAX = 0.10; // 고점 대비 10% 초과 하락 시 패턴 무효
+const D_CONFIRM_VOL = 1.5;  // 눌림목 진입 시 최소 거래량 배수
+
+function decideDRetrace(ctx: StrategyContext, scenario: StrategyScenario): StrategyDecision {
+  const { candles, candleIndex: i, position } = ctx;
+  const ind     = getInd(candles);
+  const coinP   = perCoinParams[ctx.market]?.["anomaly"];
+  const trail   = coinP?.trailingStopPct ?? scenario.params.trailingStopPct ?? 0.022;
+  const maxHold = coinP?.maxHoldCandles  ?? scenario.params.maxHoldCandles  ?? 12;
+  const retracePctMin = coinP?.retracePctMin ?? 0.030;
+
+  if (i < 52) return hold("warming-up");
+
+  if (position) {
+    const avgVol = ind.avgVol48[i];
+    const fade = avgVol !== null && candles[i].volume < avgVol * 1.2;
+    if (fade || position.holdCandles >= maxHold) return sell(fade ? "volume-fade" : "time-stop");
+    return hold("holding");
+  }
+
+  const avgVol = ind.avgVol48[i];
+  if (avgVol === null) return hold("no-data");
+
+  // 1. 최근 스파이크 탐색 (body≥2.5%, vol≥3.5×, 양봉)
+  let spikeIdx = -1;
+  for (let k = 1; k <= Math.min(D_SPIKE_WIN, i - 1); k++) {
+    const j = i - k;
+    if (ind.bodies[j] >= 0.025 && candles[j].volume / avgVol >= 2.5 && candles[j].close > candles[j].open) {
+      spikeIdx = j; break;
+    }
+  }
+  if (spikeIdx < 0) return hold("no-recent-spike");
+
+  // 2. 스파이크 이후 최고점 (스파이크 봉 + 직후 3봉 범위)
+  const spikeHigh = candles.slice(spikeIdx, Math.min(spikeIdx + 4, i))
+    .reduce((m, c) => (c.high > m ? c.high : m), 0);
+  if (spikeHigh <= 0) return hold("no-spike-high");
+
+  // 3. 눌림목 확인
+  const retrace = (spikeHigh - candles[i].close) / spikeHigh;
+  if (retrace < retracePctMin) return hold(`retrace-too-small(${(retrace * 100).toFixed(1)}%)`);
+  if (retrace > D_RETRACE_MAX) return hold("over-retraced");
+
+  // 4. 거래량 아직 뜨거움 + 회복 양봉
+  const curVol = candles[i].volume / avgVol;
+  if (curVol < D_CONFIRM_VOL) return hold("vol-cooled");
+  if (candles[i].close <= candles[i].open) return hold("not-recovering");
+
+  return buyAt(
+    ["spike-retrace", `retrace-${(retrace * 100).toFixed(1)}%`, `vol×${curVol.toFixed(1)}`],
+    0.018, 0.06, trail, maxHold,
+  );
 }
 
 // ─── variant definitions ──────────────────────────────────────────────────────
@@ -477,22 +518,11 @@ function makeVariant(
 }
 
 function buildVariants(adaptedParams: Record<TraderId, AdaptedParams>): Variant[] {
-  const sweepBestSc = makeSweepBestScenario(adaptedParams["anomaly"]);
   return [
-    makeVariant("momentum",   "Anomaly-A / Calm Impulse",    "anomaly-a", "Calm Impulse",    decideA, adaptedParams["momentum"]),
-    makeVariant("range-grid", "Anomaly-B / First Explosion", "anomaly-b", "First Explosion", decideB, adaptedParams["range-grid"]),
-    makeVariant("arbitrage",  "Anomaly-C / Confirmed Burst", "anomaly-c", "Confirmed Burst", decideC, adaptedParams["arbitrage"]),
-    {
-      slotId: "anomaly", slotName: "Anomaly-D / Sweep Best",
-      scenarioId: "anomaly-sweep-best", scenarioLabel: "Sweep Best",
-      strategy: {
-        ...anomalyStrategy,
-        id: "anomaly", name: "Anomaly-D / Sweep Best",
-        scenarios: [sweepBestSc], defaultScenario: sweepBestSc,
-        decide: decideD,
-      },
-      scenario: sweepBestSc,
-    },
+    makeVariant("momentum",   "Anomaly-A / Calm Impulse",      "anomaly-a",       "Calm Impulse",      decideA,        adaptedParams["momentum"]),
+    makeVariant("range-grid", "Anomaly-B / First Explosion",   "anomaly-b",       "First Explosion",   decideB,        adaptedParams["range-grid"]),
+    makeVariant("arbitrage",  "Anomaly-C / Confirmed Burst",   "anomaly-c",       "Confirmed Burst",   decideC,        adaptedParams["arbitrage"]),
+    makeVariant("anomaly",    "Anomaly-D / Spike Retracement", "anomaly-d-retrace", "Spike Retracement", decideDRetrace, adaptedParams["anomaly"]),
   ];
 }
 
