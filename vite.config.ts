@@ -134,4 +134,5 @@ function sendJson(res, payload) {
 
 export default defineConfig({
   plugins: [strategyRefreshPlugin(), react()],
+  server: { host: '127.0.0.1', port: 5177, strictPort: true },
 });

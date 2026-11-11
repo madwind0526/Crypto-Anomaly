@@ -36,7 +36,7 @@ function backtestResultsOverridePlugin() {
   };
 }
 
-// Read-only backtest instance on port 5174.
+// Read-only backtest instance on port 5180.
 // - Candle data served from main project's public/ (read-only, no writes)
 // - dashboard-results.json served from this worktree (new branch results)
 // - strategy-refresh API is intentionally omitted to prevent data writes
@@ -45,7 +45,7 @@ export default defineConfig({
   publicDir: mainPublicDir,
   server: {
     host: "127.0.0.1",
-    port: 5174,
+    port: 5180,
     strictPort: true,
   },
 });

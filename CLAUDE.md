@@ -16,7 +16,7 @@
 ## npm Scripts
 
 ```bash
-npm run dev                           # UI 개발 서버 (포트 5173)
+npm run dev                           # UI 개발 서버 (포트 5177)
 npm run fetch:hist5m                  # 90일치 5m 역사 데이터 갱신
 npm run fetch:anomaly:1m              # 선택 종목 1m 데이터 fetch
 npm run fetch:anomaly:1m:backtracking # 7일 1m 백트래킹 데이터 fetch
